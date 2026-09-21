@@ -1,0 +1,124 @@
+[server]
+host = "0.0.0.0"
+port = 8000
+
+[upstream]
+base_url = "http://127.0.0.1:8080"
+api_key = "change-me"
+model_alias = "qwen3.6-35b-moe"
+timeout_seconds = 180
+
+[guardrails]
+max_concurrent_inferences = 1
+queue_depth = 16
+rate_limit_per_minute = 120
+min_free_ram_gb = 16.0
+enable_agentic_tools = true
+
+[context]
+max_context_tokens = 65536
+reserve_completion_tokens = 8192
+sliding_window_turns = 7
+
+[embeddings]
+model_path = "models/bge-small-en-v1.5-int8.onnx"
+cpu_threads = 4
+dimension = 384
+
+[db]
+path = "/run/media/jstanton/MNT G (SSD 1T)/RAG DB/a_prox.db"
+mmap_size_mb = 16384
+cache_size_mb = 1024
+
+[search]
+searxng_url = "http://127.0.0.1:8888"
+timeout_seconds = 4
+max_results = 5
+cache_ttl_seconds = 86400
+
+[searxng]
+enabled = true
+port = 8888
+install_dir = "~/.local/share/a-prox-searxng"
+listen_port = 8888
+search_engines = "google,bing,duckduckgo,wikipedia,github"
+max_results = 5
+
+[ingestion]
+directories = []
+file_extensions = ["txt", "md", "json", "yaml", "yml", "toml", "html", "htm", "log", "csv", "xml"]
+excluded_patterns = ["*.lock", "*.swp", "*.tmp", ".DS_Store"]
+collection = "auto-indexed"
+max_file_size_kb = 512
+watch_interval_secs = 300
+pdf_enabled = true
+pdf_upstream_model = "qwen3.6-35b-moe"
+
+[intent]
+default_threshold = 0.70
+
+[intent.categories.agentic_tool]
+threshold = 0.70
+
+[[intent.categories.agentic_tool.examples]]
+text = "search the web for Rust async patterns"
+[[intent.categories.agentic_tool.examples]]
+text = "what's the weather like in Tokyo right now"
+[[intent.categories.agentic_tool.examples]]
+text = "fetch the content from this URL"
+[[intent.categories.agentic_tool.examples]]
+text = "look up the latest news about AI"
+[[intent.categories.agentic_tool.examples]]
+text = "check the current time"
+[[intent.categories.agentic_tool.examples]]
+text = "search online for Python tutorials"
+[[intent.categories.agentic_tool.examples]]
+text = "get me the latest headlines"
+[[intent.categories.agentic_tool.examples]]
+text = "find out what's trending today"
+[[intent.categories.agentic_tool.examples]]
+text = "search for the current price of Bitcoin"
+[[intent.categories.agentic_tool.examples]]
+text = "check the web for recent developments in quantum computing"
+
+[intent.categories.rag_search]
+threshold = 0.70
+
+[[intent.categories.rag_search.examples]]
+text = "search my docs for the API endpoint"
+[[intent.categories.rag_search.examples]]
+text = "what do my notes say about authentication"
+[[intent.categories.rag_search.examples]]
+text = "find info about the migration in my files"
+[[intent.categories.rag_search.examples]]
+text = "search knowledge base for deployment steps"
+[[intent.categories.rag_search.examples]]
+text = "what does the readme say about setup"
+[[intent.categories.rag_search.examples]]
+text = "look in my knowledge base for the config"
+[[intent.categories.rag_search.examples]]
+text = "search docs for the error handling section"
+[[intent.categories.rag_search.examples]]
+text = "what's in my files about Docker"
+
+[intent.categories.rag_ingest]
+threshold = 0.70
+
+[[intent.categories.rag_ingest.examples]]
+text = "save this to my notes"
+[[intent.categories.rag_ingest.examples]]
+text = "index this document into my knowledge base"
+[[intent.categories.rag_ingest.examples]]
+text = "store this in my local docs"
+[[intent.categories.rag_ingest.examples]]
+text = "ingest this text into my vector store"
+[[intent.categories.rag_ingest.examples]]
+text = "save this article to my knowledge base"
+[[intent.categories.rag_ingest.examples]]
+text = "index this note for future searching"
+[[intent.categories.rag_ingest.examples]]
+text = "store this in my files"
+[[intent.categories.rag_ingest.examples]]
+text = "remember this for later"
+[[intent.categories.rag_ingest.examples]]
+text = "add this to my notes"

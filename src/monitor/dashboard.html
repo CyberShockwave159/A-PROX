@@ -1,0 +1,1097 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>A-PROX Monitor</title>
+<style>
+:root {
+  --bg: #0d1117;
+  --bg-card: #161b22;
+  --bg-row-alt: #1c2128;
+  --bg-row-hover: #1f2937;
+  --border: #30363d;
+  --text: #c9d1d9;
+  --text-dim: #8b949e;
+  --accent: #58a6ff;
+  --green: #3fb950;
+  --red: #f85149;
+  --orange: #d29922;
+  --purple: #bc8cff;
+  --cyan: #39d2c0;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.5;
+}
+header {
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border);
+  padding: 12px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+header h1 {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text);
+}
+header h1 span { color: var(--accent); }
+.header-right { display: flex; align-items: center; gap: 16px; }
+.status-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  display: inline-block; margin-right: 6px;
+}
+.status-dot.live { background: var(--green); box-shadow: 0 0 6px var(--green); animation: pulse 2s infinite; }
+.status-dot.inactive { background: var(--orange); }
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+.container { padding: 16px 24px; }
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 16px;
+  margin-bottom: 16px;
+}
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 16px;
+}
+.card h2 {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.metric-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 0;
+}
+.metric-label { color: var(--text-dim); }
+.metric-value { font-weight: 600; font-family: 'SF Mono', 'Fira Code', monospace; }
+.metric-value.green { color: var(--green); }
+.metric-value.red { color: var(--red); }
+.metric-value.orange { color: var(--orange); }
+.metric-value.blue { color: var(--accent); }
+.metric-value.purple { color: var(--purple); }
+.metric-value.cyan { color: var(--cyan); }
+.gauge-container {
+  margin: 8px 0;
+}
+.gauge-bar {
+  height: 12px;
+  background: #21262d;
+  border-radius: 6px;
+  overflow: hidden;
+  position: relative;
+}
+.gauge-fill {
+  height: 100%;
+  border-radius: 6px;
+  transition: width 0.5s ease;
+}
+.gauge-fill.green { background: var(--green); }
+.gauge-fill.red { background: var(--red); }
+.gauge-fill.orange { background: var(--orange); }
+.gauge-fill.blue { background: var(--accent); }
+.gauge-fill.cyan { background: var(--cyan); }
+.gauge-labels {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 2px;
+}
+.req-card {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 10px;
+  margin-bottom: 8px;
+  border-left: 3px solid var(--accent);
+}
+.req-card.agentic { border-left-color: var(--purple); }
+.req-card.rag { border-left-color: var(--orange); }
+.req-card.fast { border-left-color: var(--green); }
+.req-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+.req-id { font-family: monospace; font-size: 11px; color: var(--text-dim); }
+.req-status {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  font-weight: 600;
+}
+.req-status.active { background: #1f2937; color: var(--orange); }
+.req-detail {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.req-detail .val { color: var(--text); font-weight: 500; }
+.full-width { grid-column: 1 / -1; }
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+th, td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+th {
+  color: var(--text-dim);
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+th:hover { color: var(--text); }
+th .sort-arrow { margin-left: 4px; font-size: 10px; }
+tr:nth-child(even) { background: var(--bg-row-alt); }
+tr:hover { background: var(--bg-row-hover); }
+.table-wrapper {
+  max-height: 500px;
+  overflow-y: auto;
+}
+.badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 600;
+}
+.badge-fast { background: rgba(63,185,80,0.15); color: var(--green); }
+.badge-rag { background: rgba(210,153,34,0.15); color: var(--orange); }
+.badge-agentic { background: rgba(188,140,255,0.15); color: var(--purple); }
+.badge-ok { background: rgba(63,185,80,0.15); color: var(--green); }
+.badge-err { background: rgba(248,81,73,0.15); color: var(--red); }
+.badge-processing { background: rgba(88,166,255,0.15); color: var(--accent); }
+.api-key-input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-family: monospace;
+  font-size: 12px;
+  width: 200px;
+}
+.api-key-input:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+.btn {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  padding: 4px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+}
+.btn:hover { opacity: 0.85; }
+.btn-sm {
+  padding: 2px 8px;
+  font-size: 11px;
+}
+.btn-danger { background: var(--red); }
+.btn-green { background: var(--green); }
+.no-data {
+  text-align: center;
+  color: var(--text-dim);
+  padding: 24px;
+  font-style: italic;
+}
+.upstream-info {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+.config-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 16px;
+}
+.filters {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.filters label {
+  font-size: 11px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+.filter-select, .filter-input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-family: monospace;
+}
+.filter-select:focus, .filter-input:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+}
+.stat-item {
+  text-align: center;
+  padding: 8px;
+  background: var(--bg);
+  border-radius: 4px;
+  border: 1px solid var(--border);
+}
+.stat-value {
+  font-size: 20px;
+  font-weight: 700;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+}
+.stat-label {
+  font-size: 10px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  margin-top: 4px;
+}
+.route-bar {
+  display: flex;
+  height: 24px;
+  border-radius: 4px;
+  overflow: hidden;
+  margin: 8px 0;
+}
+.route-bar-segment {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 600;
+  color: #fff;
+  transition: width 0.5s ease;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.route-bar-segment.fast { background: var(--green); }
+.route-bar-segment.rag { background: var(--orange); }
+.route-bar-segment.agentic { background: var(--purple); }
+.route-legend {
+  display: flex;
+  gap: 16px;
+  font-size: 11px;
+  margin-top: 4px;
+}
+.route-legend span {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.route-legend .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.error-detail {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--red);
+  word-break: break-word;
+  max-height: 80px;
+  overflow-y: auto;
+}
+.error-toggle {
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: underline;
+  font-size: 11px;
+}
+.tool-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.tool-tag {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 10px;
+  background: rgba(88,166,255,0.15);
+  color: var(--accent);
+  font-family: monospace;
+}
+.latency-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 3px 0;
+  font-size: 12px;
+  border-bottom: 1px solid rgba(48,54,61,0.5);
+}
+.latency-row:last-child { border-bottom: none; }
+@media (max-width: 768px) {
+  .grid { grid-template-columns: 1fr; }
+  .config-grid { grid-template-columns: 1fr; }
+  .stats-grid { grid-template-columns: repeat(2, 1fr); }
+  .filters { flex-direction: column; }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1><span>A-PROX</span> Monitor</h1>
+  <div class="header-right">
+    <div>
+      <span class="status-dot" id="sseDot"></span>
+      <span id="sseLabel">Connecting...</span>
+    </div>
+    <div>
+      <input type="password" class="api-key-input" id="apiKeyInput" placeholder="API Key" value="">
+      <button class="btn" onclick="saveApiKey()">Set Key</button>
+    </div>
+  </div>
+</header>
+
+<div class="container">
+  <div class="grid">
+    <!-- System Resources -->
+    <div class="card">
+      <h2>System Resources</h2>
+      <div class="metric-row">
+        <span class="metric-label">RAM Usage</span>
+        <span class="metric-value" id="ramPct">--</span>
+      </div>
+      <div class="gauge-container">
+        <div class="gauge-bar">
+          <div class="gauge-fill" id="ramGauge" style="width:0%"></div>
+        </div>
+        <div class="gauge-labels">
+          <span>Free: <span id="ramFree">--</span></span>
+          <span>Total: <span id="ramTotal">--</span></span>
+        </div>
+      </div>
+      <div class="metric-row" style="margin-top:8px">
+        <span class="metric-label">CPU Usage</span>
+        <span class="metric-value" id="cpuVal">--</span>
+      </div>
+      <div class="gauge-container">
+        <div class="gauge-bar">
+          <div class="gauge-fill" id="cpuGauge" style="width:0%"></div>
+        </div>
+      </div>
+      <div class="metric-row">
+        <span class="metric-label">Proxy Uptime</span>
+        <span class="metric-value blue" id="uptime">--</span>
+      </div>
+    </div>
+
+    <!-- Concurrency -->
+    <div class="card">
+      <h2>Concurrency</h2>
+      <div class="metric-row">
+        <span class="metric-label">Active Inferences</span>
+        <span class="metric-value" id="activeInf">0</span>
+      </div>
+      <div class="metric-row">
+        <span class="metric-label">Max Slots</span>
+        <span class="metric-value" id="maxSlots">1</span>
+      </div>
+      <div class="metric-row">
+        <span class="metric-label">Queued Requests</span>
+        <span class="metric-value orange" id="queued">0</span>
+      </div>
+      <div class="metric-row">
+        <span class="metric-label">Max Queue Depth</span>
+        <span class="metric-value" id="maxQueue">16</span>
+      </div>
+      <div class="metric-row" style="margin-top:8px">
+        <span class="metric-label">Queue Utilization</span>
+        <span class="metric-value" id="queuePct">0%</span>
+      </div>
+      <div class="gauge-container">
+        <div class="gauge-bar">
+          <div class="gauge-fill" id="queueGauge" style="width:0%"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Active Requests -->
+    <div class="card">
+      <h2>Active Requests</h2>
+      <div id="activeReqs">
+        <div class="no-data">No active requests</div>
+      </div>
+    </div>
+
+    <!-- SearXNG & DB -->
+    <div class="card">
+      <h2>Services &amp; Database</h2>
+      <div class="metric-row">
+        <span class="metric-label">SearXNG Status</span>
+        <span id="searxngStatus"><span class="badge badge-err">Unknown</span></span>
+      </div>
+      <div class="metric-row">
+        <span class="metric-label">Vector DB Chunks</span>
+        <span class="metric-value blue" id="dbChunks">--</span>
+      </div>
+      <div class="metric-row">
+        <span class="metric-label">Collections</span>
+        <span class="metric-value" id="dbCollections">--</span>
+      </div>
+      <div class="upstream-info">
+        <div class="metric-row">
+          <span class="metric-label">Upstream</span>
+          <span class="metric-value" id="upstreamUrl">--</span>
+        </div>
+        <div class="metric-row">
+          <span class="metric-label">Model</span>
+          <span class="metric-value purple" id="upstreamModel">--</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Request Statistics -->
+    <div class="card full-width">
+      <h2>Request Statistics</h2>
+      <div class="stats-grid" id="statsGrid">
+        <div class="stat-item">
+          <div class="stat-value blue" id="statTotal">--</div>
+          <div class="stat-label">Total Requests</div>
+        </div>
+        <div class="stat-item">
+          <div class="stat-value green" id="statSuccess">--</div>
+          <div class="stat-label">Success Rate</div>
+        </div>
+        <div class="stat-item">
+          <div class="stat-value cyan" id="statLatency">--</div>
+          <div class="stat-label">Avg Latency (ms)</div>
+        </div>
+        <div class="stat-item">
+          <div class="stat-value orange" id="statP99">--</div>
+          <div class="stat-label">P99 Latency (ms)</div>
+        </div>
+        <div class="stat-item">
+          <div class="stat-value purple" id="statThroughput">--</div>
+          <div class="stat-label">Token Throughput/s</div>
+        </div>
+        <div class="stat-item">
+          <div class="stat-value blue" id="statTokensSent">--</div>
+          <div class="stat-label">Total Tokens Sent</div>
+        </div>
+        <div class="stat-item">
+          <div class="stat-value cyan" id="statTokensRecv">--</div>
+          <div class="stat-label">Total Tokens Received</div>
+        </div>
+      </div>
+      <div style="margin-top:16px">
+        <h2 style="font-size:12px;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Route Distribution</h2>
+        <div class="route-bar" id="routeBar"></div>
+        <div class="route-legend" id="routeLegend"></div>
+      </div>
+    </div>
+
+    <!-- Latency Breakdown -->
+    <div class="card">
+      <h2>Latency Breakdown</h2>
+      <div class="latency-row">
+        <span class="metric-label">Avg</span>
+        <span class="metric-value" id="latAvg">--</span>
+      </div>
+      <div class="latency-row">
+        <span class="metric-label">P50 (Median)</span>
+        <span class="metric-value green" id="latP50">--</span>
+      </div>
+      <div class="latency-row">
+        <span class="metric-label">P95</span>
+        <span class="metric-value orange" id="latP95">--</span>
+      </div>
+      <div class="latency-row">
+        <span class="metric-label">P99</span>
+        <span class="metric-value red" id="latP99">--</span>
+      </div>
+      <div class="latency-row">
+        <span class="metric-label">Min</span>
+        <span class="metric-value green" id="latMin">--</span>
+      </div>
+      <div class="latency-row">
+        <span class="metric-label">Max</span>
+        <span class="metric-value red" id="latMax">--</span>
+      </div>
+    </div>
+
+    <!-- Per-Route Stats -->
+    <div class="card">
+      <h2>Per-Route Stats</h2>
+      <div id="routeStats"></div>
+    </div>
+
+    <!-- Tool Usage -->
+    <div class="card">
+      <h2>Tool Usage</h2>
+      <div id="toolUsage">
+        <div class="no-data">No tool calls recorded</div>
+      </div>
+    </div>
+
+    <!-- Request History -->
+    <div class="card full-width">
+      <h2>Request History</h2>
+      <div class="filters">
+        <label>Route:</label>
+        <select class="filter-select" id="filterRoute" onchange="applyFilters()">
+          <option value="">All Routes</option>
+          <option value="FastPassThrough">FastPassThrough</option>
+          <option value="RAGAugmented">RAGAugmented</option>
+          <option value="RAGIngestion">RAGIngestion</option>
+          <option value="AgenticToolLoop">AgenticToolLoop</option>
+        </select>
+        <label>Status:</label>
+        <select class="filter-select" id="filterStatus" onchange="applyFilters()">
+          <option value="">All Status</option>
+          <option value="success">Success</option>
+          <option value="error">Error</option>
+          <option value="processing">Processing</option>
+        </select>
+        <label>Search:</label>
+        <input type="text" class="filter-input" id="filterSearch" placeholder="request ID" oninput="applyFilters()" style="width:100px">
+        <span id="filteredCount" style="font-size:11px;color:var(--text-dim);margin-left:auto"></span>
+      </div>
+      <div class="table-wrapper">
+        <table>
+          <thead>
+            <tr>
+              <th onclick="sortTable('id')">ID <span class="sort-arrow" id="sort-id"></span></th>
+              <th onclick="sortTable('time')">Time <span class="sort-arrow" id="sort-time"></span></th>
+              <th onclick="sortTable('route')">Route <span class="sort-arrow" id="sort-route"></span></th>
+              <th onclick="sortTable('status')">Status <span class="sort-arrow" id="sort-status"></span></th>
+              <th onclick="sortTable('duration')">Duration <span class="sort-arrow" id="sort-duration"></span></th>
+              <th>Tokens/s</th>
+              <th>Msgs</th>
+              <th>Tokens In</th>
+              <th>Tokens Out</th>
+              <th>Tools</th>
+              <th>RAG</th>
+              <th>Upstream</th>
+            </tr>
+          </thead>
+          <tbody id="historyBody">
+            <tr><td colspan="12" class="no-data">No request history</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const DEFAULT_API_KEY = '';
+let apiKey = localStorage.getItem('aproxy_api_key') || DEFAULT_API_KEY;
+let allHistory = [];
+let filteredHistory = [];
+let sortField = 'time';
+let sortDir = -1;
+
+async function fetchApi() {
+  const headers = {};
+  if (apiKey) headers['X-API-Key'] = apiKey;
+  try {
+    console.log('[A-PROX Monitor] Fetching /monitor/api');
+    const resp = await fetch('/monitor/api', { headers });
+    console.log('[A-PROX Monitor] /monitor/api response:', resp.status);
+    if (resp.status === 401) {
+      showSseStatus(false, 'Auth required');
+      return null;
+    }
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    console.log('[A-PROX Monitor] /monitor/api parsed:', data.history?.length || 0, 'history entries');
+    return data;
+  } catch {
+    console.log('[A-PROX Monitor] /monitor/api fetch failed');
+    return null;
+  }
+}
+
+async function fetchStats() {
+  const headers = {};
+  if (apiKey) headers['X-API-Key'] = apiKey;
+  try {
+    console.log('[A-PROX Monitor] Fetching /monitor/stats');
+    const resp = await fetch('/monitor/stats', { headers });
+    console.log('[A-PROX Monitor] /monitor/stats response:', resp.status);
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    console.log('[A-PROX Monitor] /monitor/stats parsed:', data.total_requests, 'completed requests');
+    return data;
+  } catch {
+    console.log('[A-PROX Monitor] /monitor/stats fetch failed');
+    return null;
+  }
+}
+
+function showSseStatus(live, label) {
+  const dot = document.getElementById('sseDot');
+  const lbl = document.getElementById('sseLabel');
+  dot.className = 'status-dot ' + (live ? 'live' : 'inactive');
+  lbl.textContent = live ? (label || 'Live') : (label || 'Disconnected');
+}
+
+function formatDuration(seconds) {
+  if (seconds < 60) return seconds + 's';
+  if (seconds < 3600) return Math.floor(seconds/60) + 'm ' + (seconds%60) + 's';
+  return Math.floor(seconds/3600) + 'h ' + Math.floor((seconds%3600)/60) + 'm';
+}
+
+function formatLatency(ms) {
+  if (ms < 1) return (ms * 1000).toFixed(0) + 'ms';
+  if (ms < 1000) return ms.toFixed(0) + 'ms';
+  return (ms / 1000).toFixed(2) + 's';
+}
+
+function formatThroughput(tps) {
+  if (tps < 100) return tps.toFixed(1);
+  if (tps < 10000) return Math.round(tps).toLocaleString();
+  return (tps / 1000).toFixed(1) + 'K';
+}
+
+function renderSystem(data) {
+  const s = data.system;
+  const ramPct = s.ram_pct;
+  document.getElementById('ramPct').textContent = ramPct.toFixed(1) + '%';
+  const ramGauge = document.getElementById('ramGauge');
+  ramGauge.style.width = ramPct + '%';
+  ramGauge.className = 'gauge-fill ' + (ramPct > 85 ? 'red' : ramPct > 70 ? 'orange' : 'green');
+  document.getElementById('ramFree').textContent = s.available_ram_gb.toFixed(1) + ' GB';
+  document.getElementById('ramTotal').textContent = s.total_ram_gb.toFixed(1) + ' GB';
+  document.getElementById('ramPct').className = 'metric-value ' + (ramPct > 85 ? 'red' : ramPct > 70 ? 'orange' : 'green');
+
+  const cpu = s.global_cpu_usage_pct;
+  document.getElementById('cpuVal').textContent = cpu.toFixed(1) + '%';
+  document.getElementById('cpuGauge').style.width = Math.min(cpu, 100) + '%';
+  document.getElementById('cpuGauge').className = 'gauge-fill ' + (cpu > 85 ? 'red' : cpu > 70 ? 'orange' : 'green');
+
+  document.getElementById('uptime').textContent = formatDuration(s.uptime_seconds);
+}
+
+function renderConcurrency(data) {
+  const c = data.concurrency;
+  document.getElementById('activeInf').textContent = c.active_inferences;
+  document.getElementById('activeInf').className = 'metric-value ' + (c.active_inferences > c.max_slots * 0.8 ? 'orange' : 'green');
+  document.getElementById('maxSlots').textContent = c.max_slots;
+  document.getElementById('queued').textContent = c.queued_requests;
+  document.getElementById('maxQueue').textContent = c.queue_depth;
+  const qPct = c.queue_depth > 0 ? (c.queued_requests / c.queue_depth * 100) : 0;
+  document.getElementById('queuePct').textContent = qPct.toFixed(0) + '%';
+  document.getElementById('queueGauge').style.width = Math.min(qPct, 100) + '%';
+  document.getElementById('queueGauge').className = 'gauge-fill ' + (qPct > 85 ? 'red' : qPct > 50 ? 'orange' : 'green');
+}
+
+function renderActiveRequests(data) {
+  const el = document.getElementById('activeReqs');
+  const reqs = data.active_requests || [];
+  if (reqs.length === 0) {
+    el.innerHTML = '<div class="no-data">No active requests</div>';
+    return;
+  }
+  let html = '';
+  for (const r of reqs) {
+    const isRag = r.route_decision === 'RAGAugmented' || r.route_decision === 'RAGIngestion';
+    const routeClass = r.route_decision === 'AgenticToolLoop' ? 'agentic' : isRag ? 'rag' : 'fast';
+    const badgeClass = r.route_decision === 'AgenticToolLoop' ? 'badge-agentic' : isRag ? 'badge-rag' : 'badge-fast';
+    const duration = Math.floor((Date.now() / 1000) - r.start_time);
+    const toolsStr = r.tool_calls_executed.length > 0 ? r.tool_calls_executed.join(', ') : '-';
+    html += `<div class="req-card ${routeClass}">
+      <div class="req-header">
+        <span class="req-id">#${r.request_id}</span>
+        <span class="req-status active">ACTIVE</span>
+      </div>
+      <div class="req-detail">
+        <span>Route: <span class="val"><span class="badge ${badgeClass}">${r.route_decision}</span></span></span>
+        <span>Msgs: <span class="val">${r.messages_count}</span></span>
+        <span>Tokens In: <span class="val">${r.tokens_sent}</span></span>
+        <span>Tokens Out: <span class="val">${r.tokens_received || 0}</span></span>
+        <span>Tools: <span class="val">${r.tool_calls_executed.length}</span></span>
+        <span>RAG: <span class="val">${r.rag_hits}</span></span>
+        ${r.upstream_latency_ms != null ? `<span>Upstream: <span class="val">${r.upstream_latency_ms.toFixed(0)}ms</span></span>` : ''}
+        <span>Stream: <span class="val">${r.is_streaming ? 'yes' : 'no'}</span></span>
+        <span>Elapsed: <span class="val">${formatDuration(duration)}</span></span>
+      </div>
+    </div>`;
+  }
+  el.innerHTML = html;
+}
+
+function renderServices(data) {
+  const s = data.searxng;
+  const searxngEl = document.getElementById('searxngStatus');
+  if (s.running) {
+    searxngEl.innerHTML = '<span class="badge badge-ok">Running (:' + s.listen_port + ')</span>';
+  } else if (s.enabled) {
+    searxngEl.innerHTML = '<span class="badge badge-err">Stopped</span>';
+  } else {
+    searxngEl.innerHTML = '<span class="badge" style="background:rgba(139,148,158,0.15);color:var(--text-dim)">Disabled</span>';
+  }
+  document.getElementById('dbChunks').textContent = (data.db_stats?.total_chunks || '--');
+  const cols = data.db_stats?.collections || {};
+  const colEntries = Object.entries(cols);
+  document.getElementById('dbCollections').textContent = colEntries.length > 0
+    ? colEntries.map(([k,v]) => `${k}: ${v}`).join(', ')
+    : 'None';
+  const cfg = data.config;
+  document.getElementById('upstreamUrl').textContent = cfg.upstream_base_url;
+  document.getElementById('upstreamModel').textContent = cfg.upstream_model_alias;
+}
+
+function renderStatistics(stats) {
+  if (!stats) {
+    document.getElementById('statsGrid').innerHTML = '<div class="no-data">No statistics available</div>';
+    return;
+  }
+  document.getElementById('statTotal').textContent = stats.total_requests;
+  const successRate = stats.success_rate_pct.toFixed(1);
+  document.getElementById('statSuccess').textContent = successRate + '%';
+  document.getElementById('statSuccess').className = 'stat-value ' + (stats.success_rate_pct >= 90 ? 'green' : stats.success_rate_pct >= 70 ? 'orange' : 'red');
+  document.getElementById('statLatency').textContent = formatLatency(stats.latency.avg_ms);
+  document.getElementById('statP99').textContent = formatLatency(stats.latency.p99_ms);
+  document.getElementById('statThroughput').textContent = formatThroughput(stats.token_stats.total_token_throughput_per_sec);
+  document.getElementById('statTokensSent').textContent = stats.token_stats.total_tokens_sent.toLocaleString();
+  document.getElementById('statTokensRecv').textContent = stats.token_stats.total_tokens_received.toLocaleString();
+}
+
+function renderRouteBar(stats) {
+  const bar = document.getElementById('routeBar');
+  const legend = document.getElementById('routeLegend');
+  if (!stats || stats.route_distribution.length === 0) {
+    bar.innerHTML = '';
+    legend.innerHTML = '';
+    return;
+  }
+  const total = stats.total_requests;
+  // Sort by count descending so largest proportion appears on the left
+  const sorted = [...stats.route_distribution].sort((a, b) => b.count - a.count);
+  let barHtml = '';
+  let legendHtml = '';
+  for (const rd of sorted) {
+    const pct = total > 0 ? (rd.count / total * 100) : 0;
+    if (pct < 5) continue;
+    const cls = rd.route === 'FastPassThrough' ? 'fast' : (rd.route === 'RAGAugmented' || rd.route === 'RAGIngestion') ? 'rag' : 'agentic';
+    const label = rd.route.replace(/([A-Z])/g, ' $1').replace(/^./, s => s.toUpperCase());
+    barHtml += `<div class="route-bar-segment ${cls}" style="width:${pct}%" title="${label}: ${rd.count}">${pct > 10 ? pct.toFixed(0) + '%' : ''}</div>`;
+    legendHtml += `<span><span class="dot" style="background:var(--${cls === 'fast' ? 'green' : cls === 'rag' ? 'orange' : 'purple'})"></span>${label}: ${rd.count} (${rd.success_count} ok / ${rd.error_count} err)</span>`;
+  }
+  bar.innerHTML = barHtml || '<div style="padding:4px;color:var(--text-dim);font-size:11px">No data</div>';
+  legend.innerHTML = legendHtml;
+}
+
+function renderLatencyBreakdown(stats) {
+  if (!stats) return;
+  document.getElementById('latAvg').textContent = formatLatency(stats.latency.avg_ms);
+  document.getElementById('latP50').textContent = formatLatency(stats.latency.p50_ms);
+  document.getElementById('latP95').textContent = formatLatency(stats.latency.p95_ms);
+  document.getElementById('latP99').textContent = formatLatency(stats.latency.p99_ms);
+  document.getElementById('latMin').textContent = formatLatency(stats.latency.min_ms);
+  document.getElementById('latMax').textContent = formatLatency(stats.latency.max_ms);
+}
+
+function renderRouteStats(stats) {
+  const el = document.getElementById('routeStats');
+  if (!stats || stats.route_distribution.length === 0) {
+    el.innerHTML = '<div class="no-data">No route data</div>';
+    return;
+  }
+  // Busiest route first (backend already sorts, re-sort defensively for stability)
+  const sorted = [...stats.route_distribution].sort((a, b) =>
+    b.count - a.count || a.route.localeCompare(b.route));
+  let html = '';
+  for (const rd of sorted) {
+    const badgeClass = rd.route === 'FastPassThrough' ? 'badge-fast' : (rd.route === 'RAGAugmented' || rd.route === 'RAGIngestion') ? 'badge-rag' : 'badge-agentic';
+    html += `<div style="padding:8px;margin-bottom:6px;background:var(--bg);border-radius:4px;border:1px solid var(--border)">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+        <span class="badge ${badgeClass}">${rd.route}</span>
+        <span style="font-size:11px;color:var(--text-dim)">${rd.count} requests</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;font-size:11px;gap:12px">
+        <span>Success: <span style="color:var(--green)">${rd.success_count}</span></span>
+        <span>Errors: <span style="color:var(--red)">${rd.error_count}</span></span>
+        <span>Avg Duration: <span style="color:var(--text)">${rd.avg_duration_ms.toFixed(0)}ms</span></span>
+      </div>
+    </div>`;
+  }
+  el.innerHTML = html;
+}
+
+function renderToolUsage(stats) {
+  const el = document.getElementById('toolUsage');
+  if (!stats || stats.tool_usage.length === 0) {
+    el.innerHTML = '<div class="no-data">No tool calls recorded</div>';
+    return;
+  }
+  let html = '';
+  for (const tu of stats.tool_usage) {
+    html += `<div class="metric-row">
+      <span class="metric-label" style="font-family:monospace">${tu.tool_name}</span>
+      <span class="metric-value cyan">${tu.total_calls} calls</span>
+    </div>`;
+  }
+  el.innerHTML = html;
+}
+
+function renderHistory(data) {
+  const tbody = document.getElementById('historyBody');
+  if (!data) {
+    tbody.innerHTML = '<tr><td colspan="12" class="no-data">No request history</td></tr>';
+    allHistory = [];
+    filteredHistory = [];
+    return;
+  }
+  allHistory = data.history || [];
+  applyFilters();
+}
+
+function applyFilters() {
+  const routeFilter = document.getElementById('filterRoute').value;
+  const statusFilter = document.getElementById('filterStatus').value;
+  const searchFilter = document.getElementById('filterSearch').value.trim().toLowerCase();
+
+  filteredHistory = allHistory.filter(entry => {
+    if (routeFilter && entry.route_decision !== routeFilter) return false;
+    if (statusFilter && entry.status !== statusFilter) return false;
+    if (searchFilter && !String(entry.request_id).toLowerCase().includes(searchFilter)) return false;
+    return true;
+  });
+
+  applySorting();
+  renderHistoryTable(filteredHistory);
+}
+
+function sortTable(field) {
+  if (sortField === field) {
+    sortDir *= -1;
+  } else {
+    sortField = field;
+    sortDir = 1;
+  }
+  document.querySelectorAll('.sort-arrow').forEach(el => el.textContent = '');
+  const arrowEl = document.getElementById('sort-' + field);
+  if (arrowEl) arrowEl.textContent = sortDir > 0 ? '▲' : '▼';
+  applyFilters();
+}
+
+function applySorting() {
+  filteredHistory.sort((a, b) => {
+    let va, vb;
+    switch (sortField) {
+      case 'id': va = a.request_id; vb = b.request_id; break;
+      case 'time': va = a.timestamp; vb = b.timestamp; break;
+      case 'route': va = a.route_decision; vb = b.route_decision; break;
+      case 'status': va = a.status; vb = b.status; break;
+      case 'duration': va = a.duration_ms; vb = b.duration_ms; break;
+      default: va = a.timestamp; vb = b.timestamp;
+    }
+    if (typeof va === 'string') return sortDir * va.localeCompare(vb);
+    return sortDir * (va - vb);
+  });
+}
+
+function renderHistoryTable(history) {
+  const tbody = document.getElementById('historyBody');
+  const countEl = document.getElementById('filteredCount');
+  if (history.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="12" class="no-data">No request history</td></tr>';
+    countEl.textContent = '';
+    return;
+  }
+  countEl.textContent = `${history.length} of ${allHistory.length} requests`;
+  let html = '';
+  const reversed = [...history].reverse();
+  for (const r of reversed) {
+    const ts = new Date(r.timestamp * 1000).toLocaleTimeString();
+    const isRag = r.route_decision === 'RAGAugmented' || r.route_decision === 'RAGIngestion';
+    const routeClass = r.route_decision === 'AgenticToolLoop' ? 'badge-agentic' : isRag ? 'badge-rag' : 'badge-fast';
+    const statusClass = r.status === 'success' ? 'badge-ok' : r.status === 'error' ? 'badge-err' : 'badge-processing';
+
+    let tokensPerSec = '-';
+    if (r.duration_ms > 0 && r.tokens_sent + r.tokens_received > 0) {
+      const tps = (r.tokens_sent + r.tokens_received) / (r.duration_ms / 1000);
+      tokensPerSec = tps.toFixed(0) + '/s';
+    }
+
+    let toolsHtml = '-';
+    if (r.tool_calls_executed.length > 0) {
+      toolsHtml = '<div class="tool-list">' + r.tool_calls_executed.map(t => `<span class="tool-tag">${t}</span>`).join('') + '</div>';
+    }
+
+    let errorHtml = '';
+    if (r.error) {
+      const errorPreview = r.error.length > 100 ? r.error.substring(0, 100) + '...' : r.error;
+      errorHtml = `<span class="error-toggle" onclick="toggleError(this, '${r.request_id}')">show error</span>` +
+        `<div class="error-detail" id="error-${r.request_id}" style="display:none">${escapeHtml(r.error)}</div>`;
+    }
+
+    html += `<tr>
+      <td style="font-family:monospace;color:var(--text-dim)">${r.request_id}</td>
+      <td style="font-family:monospace;color:var(--text-dim)">${ts}</td>
+      <td><span class="badge ${routeClass}">${r.route_decision}</span></td>
+      <td><span class="badge ${statusClass}">${r.status}</span></td>
+      <td style="font-family:monospace">${r.duration_ms.toFixed(0)}ms</td>
+      <td style="font-family:monospace;color:var(--cyan)">${tokensPerSec}</td>
+      <td style="font-family:monospace">${r.messages_count}</td>
+      <td style="font-family:monospace">${r.tokens_sent}</td>
+      <td style="font-family:monospace">${r.tokens_received}</td>
+      <td>${toolsHtml}</td>
+      <td style="font-family:monospace">${r.rag_hits}</td>
+      <td style="font-family:monospace">${r.upstream_latency_ms != null ? r.upstream_latency_ms.toFixed(0) + 'ms' : '-'}</td>
+    </tr>
+    ${r.error ? `<tr><td colspan="12" style="padding:0"><div class="error-detail" id="error-${r.request_id}-detail" style="display:none;margin:0;border-radius:0;border-top:none;padding:8px">${escapeHtml(r.error)}</div></td></tr>` : ''}`;
+  }
+  tbody.innerHTML = html;
+}
+
+function toggleError(toggleEl, requestId) {
+  const errorEl = document.getElementById('error-' + requestId);
+  if (errorEl) {
+    if (errorEl.style.display === 'none') {
+      errorEl.style.display = 'block';
+      toggleEl.textContent = 'hide error';
+    } else {
+      errorEl.style.display = 'none';
+      toggleEl.textContent = 'show error';
+    }
+  }
+}
+
+function escapeHtml(str) {
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function saveApiKey() {
+  apiKey = document.getElementById('apiKeyInput').value.trim();
+  localStorage.setItem('aproxy_api_key', apiKey);
+  loadAll();
+}
+
+async function loadAll() {
+  console.log('[A-PROX Monitor] loadAll() called');
+  const apiData = await fetchApi();
+  const statsData = await fetchStats();
+  console.log('[A-PROX Monitor] API data:', apiData ? apiData.history.length + ' entries, ' + apiData.active_requests.length + ' active' : 'null/failed');
+  console.log('[A-PROX Monitor] Stats data:', statsData ? statsData.total_requests + ' completed requests' : 'null/failed');
+  if (apiData) {
+    renderSystem(apiData);
+    renderConcurrency(apiData);
+    renderActiveRequests(apiData);
+    renderServices(apiData);
+    renderHistory(apiData);
+  }
+  renderStatistics(statsData);
+  renderRouteBar(statsData);
+  renderLatencyBreakdown(statsData);
+  renderRouteStats(statsData);
+  renderToolUsage(statsData);
+}
+
+async function connectSSE() {
+  const url = '/monitor/stream';
+  try {
+    const resp = await fetch(url, {
+      headers: apiKey ? { 'X-API-Key': apiKey } : {},
+    });
+    if (!resp.ok) {
+      console.log('[A-PROX Monitor] SSE connection failed:', resp.status, resp.statusText);
+      showSseStatus(false, 'SSE Error (' + resp.status + ')');
+      return;
+    }
+    showSseStatus(true, 'Live');
+    console.log('[A-PROX Monitor] SSE connection established');
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        console.log('[A-PROX Monitor] SSE stream ended');
+        break;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          const event = line.slice(6);
+          console.log('[A-PROX Monitor] SSE event received:', event.substring(0, 80));
+          if (event === 'lagged') {
+            console.log('[A-PROX Monitor] SSE lagged event, refreshing');
+            await loadAll();
+          } else if (event === 'heartbeat') {
+            // silent keepalive
+          } else {
+            console.log('[A-PROX Monitor] SSE updating dashboard');
+            await loadAll();
+          }
+        }
+      }
+    }
+  } catch (e) {
+    console.log('[A-PROX Monitor] SSE connection error:', e.message);
+    showSseStatus(false, 'SSE Disconnected');
+  }
+}
+
+loadAll();
+connectSSE();
+
+// Poll for updates every 3 seconds (works even when tab is not focused)
+setInterval(async () => {
+  const apiData = await fetchApi();
+  const statsData = await fetchStats();
+  if (apiData) {
+    renderSystem(apiData);
+    renderConcurrency(apiData);
+    renderActiveRequests(apiData);
+    renderServices(apiData);
+    renderHistory(apiData);
+  }
+  renderStatistics(statsData);
+  renderRouteBar(statsData);
+  renderLatencyBreakdown(statsData);
+  renderRouteStats(statsData);
+  renderToolUsage(statsData);
+}, 3000);
+</script>
+</body>
+</html>

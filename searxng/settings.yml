@@ -1,0 +1,102 @@
+use_default_settings: true
+
+general:
+  debug: false
+  instance_name: "A-PROX SearXNG"
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  default_lang: ""
+  ban_time_between_queries: 0
+  formats:
+    - html
+    - json
+
+server:
+  port: 8888
+  bind_address: "127.0.0.1"
+  secret_key: "a-prox-searxng-secret-key-change-in-production"
+  limiter: false
+  http_protocol_version: "1.1"
+  image_proxy: false
+  method: "GET"
+  default_http_headers:
+    X-Content-Type-Options: nosniff
+
+engines:
+  - name: google
+    engine: google
+    shortcut: g
+    disabled: false
+
+  - name: bing
+    engine: bing
+    shortcut: b
+    disabled: false
+
+  - name: duckduckgo
+    engine: duckduckgo
+    shortcut: ddg
+    disabled: false
+
+  - name: wikipedia
+    engine: wikipedia
+    shortcut: wp
+    disabled: false
+    search_type: auto
+
+  - name: github
+    engine: github
+    shortcut: gh
+    disabled: false
+
+  - name: stackoverflow
+    engine: stackoverflow
+    shortcut: st
+    disabled: false
+
+  - name: reddit
+    engine: reddit
+    shortcut: rd
+    disabled: false
+
+  - name: startpage
+    engine: startpage
+    shortcut: sp
+    disabled: false
+
+  - name: arxiv
+    engine: arxiv
+    shortcut: arx
+    disabled: false
+
+  - name: pubmed
+    engine: pubmed
+    shortcut: pm
+    disabled: false
+
+# Redis is optional - SearXNG works without it
+# redis_url: ""
+
+outgoing:
+  request_timeout: 5.0
+  max_request_timeout: 15.0
+  useragent_suffix: "A-PROX"
+  max_retries: 1
+
+# UI settings
+ui:
+  static_use_hash: true
+  default_theme: simple
+  theme_args:
+    style_theme: ""
+  pagination_args:
+    simple_style: true
+  infinite_scroll: true
+  default_locale: ""
+
+# Performance
+engines[0].paging = true
+engines[1].paging = true
+engines[2].paging = true

@@ -1,0 +1,24 @@
+# Build artifacts (cargo target dir is 3.9GB when built)
+/target
+
+# Runtime state (recreated on startup by VectorStore::create_dir_all)
+/data
+
+# Downloaded model binaries (fetch via scripts/download_model.sh)
+/models
+
+# SearXNG virtualenv (created by scripts/download_searxng.sh / the manager)
+/searxng/.venv/
+
+# Local overrides & secrets
+/.env
+/.env.*
+config/local.toml
+
+# Desktop junk
+/.directory
+
+# Editor/OS noise
+*.swp
+.DS_Store
+*.log

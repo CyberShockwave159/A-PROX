@@ -1,0 +1,60 @@
+[package]
+name = "a-prox"
+version = "0.1.0"
+edition = "2021"
+authors = ["A-PROX Team"]
+description = "High-performance, hardware-optimized API middleware proxy for llama.cpp"
+
+[dependencies]
+# Async Web Framework & Networking
+tokio = { version = "1.40", features = ["full"] }
+bytes = "1.7"
+axum = { version = "0.8", features = ["macros", "tokio"] }
+tower = { version = "0.5", features = ["limit", "timeout", "util"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "compression-full"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "gzip", "brotli", "zstd", "rustls-tls"] }
+async-stream = "0.3"
+futures-util = "0.3"
+
+# Serialization & Protocols
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+toml = "0.8"
+base64 = "0.22"
+
+# Database & Vector Store
+rusqlite = { version = "0.32", features = ["bundled", "load_extension", "vtab"] }
+sqlite-vec = "=0.1.9"
+
+# ONNX Runtime for CPU Embeddings
+ort = { version = "2.0.0-rc.13" }
+
+# Tokenization
+tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
+
+# Web Scraping & Text Extraction
+scraper = "0.20"
+regex = "1.10"
+url = "2.5"
+
+# Caching & Utilities
+moka = { version = "0.12", features = ["future"] }
+sysinfo = "0.32"
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5.0"
+walkdir = "2"
+sha2 = "0.10"
+notify = "7"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1.0"
+thiserror = "2.0"
+clap = { version = "4.5", features = ["derive"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true
