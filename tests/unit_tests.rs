@@ -2,6 +2,7 @@ use a_prox::context::{
     inject_system_instructions, ChatMessage, ContextManager, FastTokenizer,
     ANTI_HALLUCINATION_SYSTEM_PROMPT,
 };
+use a_prox::config::ToolCommandsConfig;
 use a_prox::rag::TextChunker;
 use a_prox::router::{RequestRouter, RouteDecision};
 use a_prox::search::readability::clean_html;
@@ -320,7 +321,7 @@ fn test_router_fast_passthrough() {
         },
     ];
 
-    let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None);
+    let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None, None);
     assert_eq!(decision, RouteDecision::FastPassThrough);
 
     let messages = vec![
@@ -333,7 +334,7 @@ fn test_router_fast_passthrough() {
         },
     ];
 
-    let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None);
+    let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None, None);
     assert_eq!(decision, RouteDecision::FastPassThrough);
 
     let messages = vec![
@@ -346,7 +347,7 @@ fn test_router_fast_passthrough() {
         },
     ];
 
-    let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None);
+    let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None, None);
     assert_eq!(decision, RouteDecision::FastPassThrough);
 }
 
@@ -360,7 +361,7 @@ fn test_router_agentic_triggers() {
         tool_calls: None,
         tool_call_id: None,
     }];
-    assert_eq!(RequestRouter::classify_request(&messages, None, false, false, None, None, None), RouteDecision::AgenticToolLoop);
+    assert_eq!(RequestRouter::classify_request(&messages, None, false, false, None, None, None, None), RouteDecision::AgenticToolLoop);
 
     let messages = vec![ChatMessage {
         role: "user".to_string(),
@@ -369,7 +370,7 @@ fn test_router_agentic_triggers() {
         tool_calls: None,
         tool_call_id: None,
     }];
-    assert_eq!(RequestRouter::classify_request(&messages, None, false, false, None, None, None), RouteDecision::AgenticToolLoop);
+    assert_eq!(RequestRouter::classify_request(&messages, None, false, false, None, None, None, None), RouteDecision::AgenticToolLoop);
 
     let messages = vec![ChatMessage {
         role: "user".to_string(),
@@ -378,7 +379,7 @@ fn test_router_agentic_triggers() {
         tool_calls: None,
         tool_call_id: None,
     }];
-    assert_eq!(RequestRouter::classify_request(&messages, None, false, false, None, None, None), RouteDecision::AgenticToolLoop);
+    assert_eq!(RequestRouter::classify_request(&messages, None, false, false, None, None, None, None), RouteDecision::AgenticToolLoop);
 
     let messages = vec![ChatMessage {
         role: "user".to_string(),
@@ -387,7 +388,7 @@ fn test_router_agentic_triggers() {
         tool_calls: None,
         tool_call_id: None,
     }];
-    assert_eq!(RequestRouter::classify_request(&messages, None, false, false, None, None, None), RouteDecision::AgenticToolLoop);
+    assert_eq!(RequestRouter::classify_request(&messages, None, false, false, None, None, None, None), RouteDecision::AgenticToolLoop);
 
     let messages = vec![ChatMessage {
         role: "user".to_string(),
@@ -396,7 +397,7 @@ fn test_router_agentic_triggers() {
         tool_calls: None,
         tool_call_id: None,
     }];
-    assert_eq!(RequestRouter::classify_request(&messages, None, false, false, None, None, None), RouteDecision::AgenticToolLoop);
+    assert_eq!(RequestRouter::classify_request(&messages, None, false, false, None, None, None, None), RouteDecision::AgenticToolLoop);
 
     let messages = vec![ChatMessage {
         role: "user".to_string(),
@@ -405,7 +406,7 @@ fn test_router_agentic_triggers() {
         tool_calls: None,
         tool_call_id: None,
     }];
-    assert_eq!(RequestRouter::classify_request(&messages, None, false, false, None, None, None), RouteDecision::AgenticToolLoop);
+    assert_eq!(RequestRouter::classify_request(&messages, None, false, false, None, None, None, None), RouteDecision::AgenticToolLoop);
 
     // System time triggers
     let messages = vec![ChatMessage {
@@ -415,7 +416,7 @@ fn test_router_agentic_triggers() {
         tool_calls: None,
         tool_call_id: None,
     }];
-    assert_eq!(RequestRouter::classify_request(&messages, None, false, false, None, None, None), RouteDecision::AgenticToolLoop);
+    assert_eq!(RequestRouter::classify_request(&messages, None, false, false, None, None, None, None), RouteDecision::AgenticToolLoop);
 
     let messages = vec![ChatMessage {
         role: "user".to_string(),
@@ -424,7 +425,7 @@ fn test_router_agentic_triggers() {
         tool_calls: None,
         tool_call_id: None,
     }];
-    assert_eq!(RequestRouter::classify_request(&messages, None, false, false, None, None, None), RouteDecision::AgenticToolLoop);
+    assert_eq!(RequestRouter::classify_request(&messages, None, false, false, None, None, None, None), RouteDecision::AgenticToolLoop);
 
     let messages = vec![ChatMessage {
         role: "user".to_string(),
@@ -433,7 +434,7 @@ fn test_router_agentic_triggers() {
         tool_calls: None,
         tool_call_id: None,
     }];
-    assert_eq!(RequestRouter::classify_request(&messages, None, false, false, None, None, None), RouteDecision::AgenticToolLoop);
+    assert_eq!(RequestRouter::classify_request(&messages, None, false, false, None, None, None, None), RouteDecision::AgenticToolLoop);
 
     let messages = vec![ChatMessage {
         role: "user".to_string(),
@@ -442,7 +443,127 @@ fn test_router_agentic_triggers() {
         tool_calls: None,
         tool_call_id: None,
     }];
-    assert_eq!(RequestRouter::classify_request(&messages, None, false, false, None, None, None), RouteDecision::AgenticToolLoop);
+    assert_eq!(RequestRouter::classify_request(&messages, None, false, false, None, None, None, None), RouteDecision::AgenticToolLoop);
+}
+
+#[test]
+fn test_router_tool_command_flags() {
+    let cmd = ToolCommandsConfig::default();
+
+    // Generic "/tools" with a non-tool query arms all internal tools (empty list).
+    let messages = vec![ChatMessage {
+        role: "user".to_string(),
+        content: Some(json!("/tools help me with my bash history")),
+        name: None,
+        tool_calls: None,
+        tool_call_id: None,
+    }];
+    assert_eq!(
+        RequestRouter::classify_request(&messages, None, false, false, None, None, None, Some(&cmd)),
+        RouteDecision::AgenticToolForced { tools: vec![], query: "help me with my bash history".to_string() }
+    );
+
+    // Each per-tool flag maps to its canonical tool name.
+    let cases = [
+        ("/search current gpu prices", vec!["web_search"]),
+        ("/fetch https://example.com", vec!["web_fetch"]),
+        ("/ragsearch how does RRF work", vec!["rag_search"]),
+        ("/ingest the following article", vec!["rag_ingest"]),
+        ("/time", vec!["system_time"]),
+        ("/image a red circle on white", vec!["image_generate"]),
+        ("/file write a fibonacci script", vec!["write_file"]),
+    ];
+    for (msg, tools) in cases {
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: Some(json!(msg)),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+        }];
+        match RequestRouter::classify_request(&messages, None, false, false, None, None, None, Some(&cmd)) {
+            RouteDecision::AgenticToolForced { tools: t, .. } => assert_eq!(t, tools),
+            other => panic!("expected AgenticToolForced for {:?}, got {:?}", msg, other),
+        }
+    }
+
+    // "/tools" accepts leading tool-name args (incl. aliases) to arm a subset.
+    let cases = [
+        ("/tools search fetch", vec!["web_search", "web_fetch"].into_iter().map(String::from).collect::<Vec<_>>()),
+        ("/tools rag time", vec!["rag_search", "system_time"].into_iter().map(String::from).collect::<Vec<_>>()),
+        ("/tools image file", vec!["image_generate", "write_file"].into_iter().map(String::from).collect::<Vec<_>>()),
+        ("/tools search fetch bitcoin price", vec!["web_search", "web_fetch"].into_iter().map(String::from).collect::<Vec<_>>()),
+    ];
+    for (msg, expected) in cases {
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: Some(json!(msg)),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+        }];
+        match RequestRouter::classify_request(&messages, None, false, false, None, None, None, Some(&cmd)) {
+            RouteDecision::AgenticToolForced { tools, query } => {
+                assert_eq!(tools, expected);
+                assert!(!query.contains("search") && !query.contains("fetch"));
+            }
+            other => panic!("expected AgenticToolForced for {:?}, got {:?}", msg, other),
+        }
+    }
+
+    // Disabled (empty) flag never matches.
+    let mut custom = ToolCommandsConfig::default();
+    custom.web_search = String::new();
+    let messages = vec![ChatMessage {
+        role: "user".to_string(),
+        content: Some(json!("/search what is a black hole")),
+        name: None,
+        tool_calls: None,
+        tool_call_id: None,
+    }];
+    assert_ne!(
+        RequestRouter::classify_request(&messages, None, false, false, None, None, None, Some(&custom)),
+        RouteDecision::AgenticToolForced { tools: vec!["web_search".to_string()], query: "what is a black hole".to_string() }
+    );
+}
+
+#[test]
+fn test_router_configurable_routing_commands() {
+    let cmd = ToolCommandsConfig::default();
+    let msg = |s: &str| ChatMessage {
+        role: "user".to_string(),
+        content: Some(json!(s)),
+        name: None,
+        tool_calls: None,
+        tool_call_id: None,
+    };
+
+    // Defaults preserved: bypass family → passthrough, rag family → RAG.
+    assert_eq!(
+        RequestRouter::classify_request(&[msg("/bypass ignore this")], None, false, false, None, None, None, Some(&cmd)),
+        RouteDecision::FastPassThrough
+    );
+    assert_eq!(
+        RequestRouter::classify_request(&[msg("/direct go")], None, false, false, None, None, None, Some(&cmd)),
+        RouteDecision::FastPassThrough
+    );
+    assert_eq!(
+        RequestRouter::classify_request(&[msg("/pass through")], None, false, false, None, None, None, Some(&cmd)),
+        RouteDecision::FastPassThrough
+    );
+    assert!(matches!(
+        RequestRouter::classify_request(&[msg("/docs search docs for embedding config")], None, false, false, None, None, None, Some(&cmd)),
+        RouteDecision::RAGAugmented { ref query } if query.contains("embedding config")
+    ));
+
+    // Custom routing flags take effect; empty ones disable the command.
+    let mut custom = ToolCommandsConfig::default();
+    custom.bypass = String::new();
+    custom.rag = "/searchdocs".to_string();
+    assert_eq!(
+        RequestRouter::classify_request(&[msg("/bypass nope")], None, false, false, None, None, None, Some(&custom)),
+        RouteDecision::FastPassThrough
+    );
 }
 
 #[test]
@@ -456,7 +577,7 @@ fn test_router_bypasses() {
     }];
 
     // Header bypass should force FastPassThrough even with search intent
-    let decision = RequestRouter::classify_request(&messages, None, true, false, None, None, None);
+    let decision = RequestRouter::classify_request(&messages, None, true, false, None, None, None, None);
     assert_eq!(decision, RouteDecision::FastPassThrough);
 
     // Slash command bypasses
@@ -467,7 +588,7 @@ fn test_router_bypasses() {
         tool_calls: None,
         tool_call_id: None,
     }];
-    let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None);
+    let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None, None);
     assert_eq!(decision, RouteDecision::FastPassThrough);
 
     let messages = vec![ChatMessage {
@@ -477,7 +598,7 @@ fn test_router_bypasses() {
         tool_calls: None,
         tool_call_id: None,
     }];
-    let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None);
+    let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None, None);
     assert_eq!(decision, RouteDecision::FastPassThrough);
 
     let messages = vec![ChatMessage {
@@ -487,7 +608,7 @@ fn test_router_bypasses() {
         tool_calls: None,
         tool_call_id: None,
     }];
-    let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None);
+    let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None, None);
     assert_eq!(decision, RouteDecision::FastPassThrough);
 }
 
@@ -535,7 +656,7 @@ fn test_router_rag_intent() {
         tool_calls: None,
         tool_call_id: None,
     }];
-    let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None);
+    let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None, None);
     match decision {
         RouteDecision::RAGAugmented { query } => {
             assert!(query.contains("knowledge base"));
@@ -550,7 +671,7 @@ fn test_router_rag_intent() {
         tool_calls: None,
         tool_call_id: None,
     }];
-    let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None);
+    let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None, None);
     match decision {
         RouteDecision::RAGAugmented { .. } => {}
         _ => panic!("Expected RAGAugmented, got {:?}", decision),
@@ -563,7 +684,7 @@ fn test_router_rag_intent() {
         tool_calls: None,
         tool_call_id: None,
     }];
-    let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None);
+    let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None, None);
     match decision {
         RouteDecision::RAGAugmented { .. } => {}
         _ => panic!("Expected RAGAugmented, got {:?}", decision),
@@ -590,16 +711,16 @@ fn test_router_tools_trigger() {
         }
     ]);
 
-    let decision = RequestRouter::classify_request(&messages, Some(&tools), false, false, None, None, None);
+    let decision = RequestRouter::classify_request(&messages, Some(&tools), false, false, None, None, None, None);
     assert_eq!(decision, RouteDecision::AgenticToolLoop);
 
     // Empty tools array should not trigger agentic
     let empty_tools = json!([]);
-    let decision = RequestRouter::classify_request(&messages, Some(&empty_tools), false, false, None, None, None);
+    let decision = RequestRouter::classify_request(&messages, Some(&empty_tools), false, false, None, None, None, None);
     assert_eq!(decision, RouteDecision::FastPassThrough);
 
     // No tools and no agentic tools enabled = FastPassThrough
-    let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None);
+    let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None, None);
     assert_eq!(decision, RouteDecision::FastPassThrough);
 }
 
@@ -614,15 +735,15 @@ fn test_router_model_name_targeting() {
     }];
 
     // a-prox-direct should force FastPassThrough regardless of message content
-    let decision = RequestRouter::classify_request(&messages, None, false, true, Some("a-prox-direct"), None, None);
+    let decision = RequestRouter::classify_request(&messages, None, false, true, Some("a-prox-direct"), None, None, None);
     assert_eq!(decision, RouteDecision::FastPassThrough);
 
     // a-prox-rag should route to RAGAugmented
-    let decision = RequestRouter::classify_request(&messages, None, false, false, Some("a-prox-rag"), None, None);
+    let decision = RequestRouter::classify_request(&messages, None, false, false, Some("a-prox-rag"), None, None, None);
     assert!(matches!(decision, RouteDecision::RAGAugmented { .. }));
 
     // a-prox-agent should route to AgenticToolLoop
-    let decision = RequestRouter::classify_request(&messages, None, false, false, Some("a-prox-agent"), None, None);
+    let decision = RequestRouter::classify_request(&messages, None, false, false, Some("a-prox-agent"), None, None, None);
     assert_eq!(decision, RouteDecision::AgenticToolLoop);
 
     // a-prox-rag with specific message content
@@ -633,7 +754,7 @@ fn test_router_model_name_targeting() {
         tool_calls: None,
         tool_call_id: None,
     }];
-    let decision = RequestRouter::classify_request(&rag_messages, None, false, false, Some("a-prox-rag"), None, None);
+    let decision = RequestRouter::classify_request(&rag_messages, None, false, false, Some("a-prox-rag"), None, None, None);
     if let RouteDecision::RAGAugmented { query } = decision {
         assert!(query.contains("capital of France"));
     } else {
@@ -650,7 +771,7 @@ fn test_router_rag_ingestion_intent() {
         tool_calls: None,
         tool_call_id: None,
     }];
-    let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None);
+    let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None, None);
     if let RouteDecision::RAGIngestion { content } = decision {
         assert!(content.contains("important document content"));
     } else {
@@ -664,7 +785,7 @@ fn test_router_rag_ingestion_intent() {
         tool_calls: None,
         tool_call_id: None,
     }];
-    let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None);
+    let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None, None);
     if let RouteDecision::RAGIngestion { content } = decision {
         assert!(content.contains("meeting notes"));
     } else {
@@ -678,7 +799,7 @@ fn test_router_rag_ingestion_intent() {
         tool_calls: None,
         tool_call_id: None,
     }];
-    let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None);
+    let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None, None);
     assert!(matches!(decision, RouteDecision::RAGIngestion { .. }));
 }
 
@@ -706,7 +827,7 @@ fn test_router_rag_ingestion_natural_phrasings() {
             tool_calls: None,
             tool_call_id: None,
         }];
-        let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None);
+        let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None, None);
         assert!(
             matches!(&decision, RouteDecision::RAGIngestion { .. }),
             "Expected RAGIngestion for '{}' but got {:?}",
@@ -729,7 +850,7 @@ fn test_router_rag_ingestion_natural_phrasings() {
             tool_calls: None,
             tool_call_id: None,
         }];
-        let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None);
+        let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None, None);
         assert!(
             matches!(&decision, RouteDecision::RAGAugmented { .. }),
             "Expected RAGAugmented (search) for '{}' but got {:?}",
@@ -759,7 +880,7 @@ fn test_router_additional_web_search_keywords() {
             tool_calls: None,
             tool_call_id: None,
         }];
-        let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None);
+        let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None, None);
         if expect_agentic {
             assert!(
                 matches!(decision, RouteDecision::AgenticToolLoop),
@@ -781,11 +902,11 @@ fn test_router_agentic_disabled_no_tools() {
     }];
 
     // With agentic_tools_enabled = false, should still detect search intent and route to AgenticToolLoop
-    let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None);
+    let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None, None);
     assert_eq!(decision, RouteDecision::AgenticToolLoop);
 
     // Web search without agentic_tools_enabled should still go to AgenticToolLoop (intent detection is independent)
-    let decision = RequestRouter::classify_request(&messages, None, false, true, None, None, None);
+    let decision = RequestRouter::classify_request(&messages, None, false, true, None, None, None, None);
     assert_eq!(decision, RouteDecision::AgenticToolLoop);
 
     // General chat with agentic_tools_enabled = false stays FastPassThrough
@@ -796,7 +917,7 @@ fn test_router_agentic_disabled_no_tools() {
         tool_calls: None,
         tool_call_id: None,
     }];
-    let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None);
+    let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None, None);
     assert_eq!(decision, RouteDecision::FastPassThrough);
 }
 
@@ -832,7 +953,7 @@ fn test_router_broad_web_search_patterns() {
             tool_calls: None,
             tool_call_id: None,
         }];
-        let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None);
+        let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None, None);
         assert!(
             matches!(decision, RouteDecision::AgenticToolLoop),
             "Expected AgenticToolLoop for '{}' but got {:?}",
@@ -859,7 +980,7 @@ fn test_router_broad_web_fetch_patterns() {
             tool_calls: None,
             tool_call_id: None,
         }];
-        let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None);
+        let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None, None);
         assert!(
             matches!(decision, RouteDecision::AgenticToolLoop),
             "Expected AgenticToolLoop for '{}' but got {:?}",
@@ -890,7 +1011,7 @@ fn test_router_news_with_intermediate_words() {
             tool_calls: None,
             tool_call_id: None,
         }];
-        let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None);
+        let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None, None);
         assert!(
             matches!(decision, RouteDecision::AgenticToolLoop),
             "Expected AgenticToolLoop for '{}' but got {:?}",

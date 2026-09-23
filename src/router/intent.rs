@@ -3,7 +3,8 @@ use std::sync::Arc;
 use std::sync::RwLock;
 
 use crate::config::{
-    default_agentic_examples, default_rag_ingest_examples, default_rag_search_examples, IntentConfig,
+    default_agentic_examples, default_file_generation_examples, default_image_generation_examples,
+    default_rag_ingest_examples, default_rag_search_examples, IntentConfig,
 };
 use crate::embeddings::CpuEmbedder;
 
@@ -15,6 +16,8 @@ pub enum IntentCategory {
     AgenticTool,
     RAGSearch,
     RAGINGEST,
+    ImageGeneration,
+    FileGeneration,
     Passthrough,
 }
 
@@ -24,6 +27,8 @@ impl IntentCategory {
             IntentCategory::AgenticTool => "agentic_tool",
             IntentCategory::RAGSearch => "rag_search",
             IntentCategory::RAGINGEST => "rag_ingest",
+            IntentCategory::ImageGeneration => "image_generation",
+            IntentCategory::FileGeneration => "file_generation",
             IntentCategory::Passthrough => "passthrough",
         }
     }
@@ -92,6 +97,22 @@ impl IntentClassifier {
                 configured.clone()
             }
         };
+        let image_generation_examples: Vec<_> = {
+            let configured = &config.categories.image_generation.examples;
+            if configured.is_empty() {
+                default_image_generation_examples()
+            } else {
+                configured.clone()
+            }
+        };
+        let file_generation_examples: Vec<_> = {
+            let configured = &config.categories.file_generation.examples;
+            if configured.is_empty() {
+                default_file_generation_examples()
+            } else {
+                configured.clone()
+            }
+        };
 
         if !agentic_examples.is_empty() {
             let centroid = build_centroid(&embedder, &agentic_examples);
@@ -117,6 +138,24 @@ impl IntentClassifier {
                 category: IntentCategory::RAGINGEST,
                 embedding: centroid,
                 threshold: config.categories.rag_ingest.threshold,
+            });
+        }
+
+        if !image_generation_examples.is_empty() {
+            let centroid = build_centroid(&embedder, &image_generation_examples);
+            centroids.push(IntentCentroid {
+                category: IntentCategory::ImageGeneration,
+                embedding: centroid,
+                threshold: config.categories.image_generation.threshold,
+            });
+        }
+
+        if !file_generation_examples.is_empty() {
+            let centroid = build_centroid(&embedder, &file_generation_examples);
+            centroids.push(IntentCentroid {
+                category: IntentCategory::FileGeneration,
+                embedding: centroid,
+                threshold: config.categories.file_generation.threshold,
             });
         }
 

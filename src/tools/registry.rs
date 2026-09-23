@@ -149,11 +149,103 @@ impl ToolRegistry {
         ])
     }
 
+    /// Returns the JSON schema definition for a single tool by name, covering
+    /// the internal tools and the separately-armed image/write_file tools.
+    /// Used by the `/flag` tool commands to restrict the loop to one tool.
+    pub fn definition_for(&self, name: &str) -> Option<serde_json::Value> {
+        if name == "image_generate" {
+            return Some(self.image_generate_definition());
+        }
+        if name == "write_file" {
+            return Some(self.write_file_definition());
+        }
+        self.get_internal_tools_definitions()
+            .as_array()?
+            .iter()
+            .find(|t| t.pointer("/function/name").and_then(|n| n.as_str()) == Some(name))
+            .cloned()
+    }
+
+    /// Returns the JSON schema definition for the image_generate tool. This is
+    /// NOT part of `get_internal_tools_definitions`; it is armed separately by the
+    /// agentic loop only when a request is detected to be an image request.
+    pub fn image_generate_definition(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "image_generate",
+                "description": "Generate or edit an image. Write the final, detailed visual prompt first as 'rewritten_prompt', then call this tool. Returns a publicly reachable URL to the generated PNG.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "rewritten_prompt": {
+                            "type": "string",
+                            "description": "The detailed, expanded visual prompt describing exactly what to render"
+                        },
+                        "wh_ratio": {
+                            "type": "string",
+                            "description": "Desired aspect ratio as W:H (e.g. \"16:9\", \"3:2\", \"1:1\", \"2:3\")"
+                        },
+                        "ratio_follow": {
+                            "type": "string",
+                            "description": "When editing an attached photo, set to \"<image1>\" to follow the reference image's own dimensions"
+                        },
+                        "negative_prompt": {
+                            "type": "string",
+                            "description": "Optional extra things to avoid in the generated image"
+                        }
+                    },
+                    "required": ["rewritten_prompt"]
+                }
+            }
+        })
+    }
+
+    /// Returns the JSON schema definition for the write_file tool. This is NOT
+    /// part of `get_internal_tools_definitions`; it is armed separately by the
+    /// agentic loop only when a request is detected to be a file-write request.
+    pub fn write_file_definition(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "write_file",
+                "description": "Save text to a file served by A-PROX (returns a publicly reachable /files/ URL). Use 'overwrite' for the first chunk of a file and 'append' to continue writing the same file (same filename, content in pieces) when the body is long. Keep the reply to the user short and include the file URL.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "filename": {
+                            "type": "string",
+                            "description": "File name ending in a suitable extension, e.g. \"notes.md\", \"solver.py\", \"data.csv\""
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "The full text content to write. If too long for one call, split it and continue with mode='append' using the same filename."
+                        },
+                        "mode": {
+                            "type": "string",
+                            "enum": ["overwrite", "append"],
+                            "description": "overwrite replaces the file content; append adds to the previously written file with the same filename (used to stream long documents across turns)"
+                        }
+                    },
+                    "required": ["filename", "content"]
+                }
+            }
+        })
+    }
+
     /// Executes a detected tool call
     pub async fn execute_tool(&self, call: &ExtractedToolCall) -> String {
         tracing::info!("Executing tool: {} with args: {}", call.name, call.arguments);
 
         match call.name.as_str() {
+            "write_file" => {
+                "Error: write_file is orchestrated by the agentic loop (routes.rs) and is not available here directly. It only runs inside an armed file request."
+                    .to_string()
+            }
+            "image_generate" => {
+                "Error: image_generate is orchestrated by the agentic loop (routes.rs) and is not available here directly. It only runs inside an armed image request."
+                    .to_string()
+            }
             "web_search" => {
                 let query = call.arguments.get("query").and_then(|v| v.as_str()).unwrap_or("");
                 let count = call.arguments.get("count").and_then(|v| v.as_u64()).map(|c| c as usize);

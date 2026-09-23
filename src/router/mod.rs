@@ -1,6 +1,6 @@
 use serde_json::Value;
 use crate::context::ChatMessage;
-use crate::config::IntentConfig;
+use crate::config::{IntentConfig, ToolCommandsConfig};
 
 mod intent;
 pub use intent::{IntentCategory, IntentClassifier};
@@ -13,6 +13,10 @@ pub enum RouteDecision {
     /// The `content` field is the cleaned text to be ingested.
     RAGIngestion { content: String },
     AgenticToolLoop,
+    /// Forced by a `/flag` tool command (see `ToolCommandsConfig`). `tools` lists
+    /// the tool names to arm (empty = all internal tools); `query` is the message
+    /// text with the flag (and any tool-name args) stripped.
+    AgenticToolForced { tools: Vec<String>, query: String },
 }
 
 /// Internal intent classification used by classify_request.
@@ -45,6 +49,7 @@ impl RequestRouter {
         model_name: Option<&str>,
         intent_classifier: Option<&IntentClassifier>,
         intent_config: Option<&IntentConfig>,
+        tool_commands: Option<&ToolCommandsConfig>,
     ) -> RouteDecision {
         // 1. Explicit model targeting takes highest priority
         if let Some(name) = model_name {
@@ -74,23 +79,36 @@ impl RequestRouter {
             let content = last_user_msg.content_as_str();
             let trimmed = content.trim();
 
-            // Slash command overrides
-            if trimmed.starts_with("/bypass") || trimmed.starts_with("/direct") || trimmed.starts_with("/pass") {
+            // Slash command overrides (all configurable via [tool_commands], defaults below).
+            let default_cmds = ToolCommandsConfig::default();
+            let cmds = tool_commands.unwrap_or(&default_cmds);
+            if Self::starts_with_any(trimmed, &[&cmds.bypass, &cmds.direct, &cmds.pass_route]) {
                 return RouteDecision::FastPassThrough;
             }
 
+            // Per-tool slash-command flags: force the agentic loop with the
+            // flagged tool armed (explicit user intent beats keyword detection).
+            if let Some((tools, query)) = Self::match_tool_command(&content, cmds) {
+                return RouteDecision::AgenticToolForced { tools, query };
+            }
+
+            // Image requests route through the agentic loop so the image_generate
+            // tool can be armed (independent of the 0.70 intent threshold).
+            if crate::imagegen::is_image_request(messages) {
+                return RouteDecision::AgenticToolLoop;
+            }
+
+            // File-write requests route through the agentic loop so the write_file
+            // tool can be armed, mirroring the image check above.
+            if crate::filegen::is_file_request(messages) {
+                return RouteDecision::AgenticToolLoop;
+            }
+
             // Check model-targeting slash commands
-            if trimmed.starts_with("/rag") || trimmed.starts_with("/knowledge") || trimmed.starts_with("/docs") {
+            if Self::starts_with_any(trimmed, &[&cmds.rag, &cmds.knowledge, &cmds.docs]) {
                 let intent = detect_intent(&content);
                 if matches!(intent, RouteIntent::RAG) {
-                    let clean_query = content
-                        .replace("/rag", "")
-                        .replace("/knowledge", "")
-                        .replace("/docs", "")
-                        .replace("search docs", "")
-                        .replace("in knowledge base", "")
-                        .trim()
-                        .to_string();
+                    let clean_query = Self::clean_rag_query(&content, cmds);
                     return RouteDecision::RAGAugmented {
                         query: if clean_query.is_empty() { content.to_string() } else { clean_query },
                     };
@@ -98,7 +116,7 @@ impl RequestRouter {
             }
 
             // Intent-based routing
-            let routed = Self::route_by_intent(&content, intent_classifier, intent_config);
+            let routed = Self::route_by_intent(&content, intent_classifier, intent_config, Some(cmds));
             if let Some(decision) = routed {
                 return decision;
             }
@@ -115,11 +133,109 @@ impl RequestRouter {
         RouteDecision::FastPassThrough
     }
 
+/// Match the leading slash-command flag in `content` against the configured
+/// per-tool commands. Returns the tool names to arm (empty = all internal tools
+/// for the generic `/tools` flag) plus the message text with the flag stripped.
+/// Longest flag wins so `/ragsearch` beats `/search`.
+///
+/// The generic `/tools` flag also accepts tool-name args (`/tools search fetch`)
+/// to arm an exact subset; leading recognized tokens are consumed as tool
+/// selectors and the remainder becomes the query.
+pub fn match_tool_command(
+    content: &str,
+    commands: &ToolCommandsConfig,
+) -> Option<(Vec<String>, String)> {
+    let mut entries: Vec<(&str, &str)> = vec![
+        ("agentic", &commands.agentic),
+        ("web_search", &commands.web_search),
+        ("web_fetch", &commands.web_fetch),
+        ("rag_search", &commands.rag_search),
+        ("rag_ingest", &commands.rag_ingest),
+        ("system_time", &commands.system_time),
+        ("image_generate", &commands.image_generate),
+        ("write_file", &commands.write_file),
+    ];
+    entries.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+    let trimmed = content.trim();
+    for (tool, flag) in entries {
+        if flag.is_empty() || !flag.starts_with('/') {
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix(flag) {
+            return Some(Self::parse_tool_command(tool, rest));
+        }
+    }
+    None
+}
+
+/// Build the `RouteDecision` payload for a matched flag: resolve the canonical
+/// tool name(s) and the cleaned query text.
+fn parse_tool_command(tool: &str, rest: &str) -> (Vec<String>, String) {
+    let rest = rest.trim();
+    if tool != "agentic" {
+        // Single-tool flags always arm exactly that tool.
+        return (vec![tool.to_string()], rest.to_string());
+    }
+    // `/tools` — greedily consume leading tool-name tokens as selectors.
+    let tokens: Vec<&str> = rest.split_whitespace().collect();
+    let mut tools = Vec::new();
+    let mut consumed = 0;
+    for token in &tokens {
+        match Self::resolve_tool_alias(token) {
+            Some(canonical) => {
+                if !tools.contains(&canonical) {
+                    tools.push(canonical);
+                }
+                consumed += 1;
+            }
+            None => break,
+        }
+    }
+    let query = tokens[consumed..].join(" ");
+    (tools, query)
+}
+
+/// Map user-facing tool selectors and aliases to canonical tool names.
+fn resolve_tool_alias(token: &str) -> Option<String> {
+    let t = token.to_lowercase();
+    let canonical = match t.as_str() {
+        "search" | "web_search" => "web_search",
+        "fetch" | "web_fetch" => "web_fetch",
+        "rag" | "ragsearch" | "rag_search" | "knowledge" | "docs" => "rag_search",
+        "ingest" | "rag_ingest" => "rag_ingest",
+        "time" | "date" | "system_time" => "system_time",
+        "image" | "img" | "image_generate" => "image_generate",
+        "file" | "write_file" => "write_file",
+        _ => return None,
+    };
+    Some(canonical.to_string())
+}
+
+/// True when `s` starts with any of the non-empty configured flags.
+fn starts_with_any(s: &str, flags: &[&String]) -> bool {
+    flags.iter().any(|f| !f.is_empty() && s.starts_with(f.as_str()))
+}
+
+/// Strip configured RAG flags and legacy phrases from the query text.
+fn clean_rag_query(content: &str, commands: &ToolCommandsConfig) -> String {
+    let mut q = content.to_string();
+    for f in [&commands.rag, &commands.knowledge, &commands.docs] {
+        if !f.is_empty() {
+            q = q.replace(f.as_str(), "");
+        }
+    }
+    for phrase in ["search docs", "in knowledge base"] {
+        q = q.replace(phrase, "");
+    }
+    q.trim().to_string()
+}
+
     /// Route based on intent detection (hybrid keyword + embedding).
     fn route_by_intent(
         content: &str,
         classifier: Option<&IntentClassifier>,
         _config: Option<&IntentConfig>,
+        commands: Option<&ToolCommandsConfig>,
     ) -> Option<RouteDecision> {
         // If no classifier provided, use pure keyword detection
         let intent = match classifier {
@@ -127,6 +243,8 @@ impl RequestRouter {
                 let (cat, _confidence) = classifier.classify(content);
                 match cat {
                     IntentCategory::AgenticTool => RouteIntent::AgenticTool,
+                    IntentCategory::ImageGeneration => RouteIntent::AgenticTool,
+                    IntentCategory::FileGeneration => RouteIntent::AgenticTool,
                     IntentCategory::RAGSearch => RouteIntent::RAG,
                     IntentCategory::RAGINGEST => RouteIntent::RAGIngestion,
                     IntentCategory::Passthrough => RouteIntent::None,
@@ -140,12 +258,15 @@ impl RequestRouter {
                 Some(RouteDecision::AgenticToolLoop)
             }
             RouteIntent::RAG => {
-                let clean_query = content
-                    .replace("/rag", "")
-                    .replace("search docs", "")
-                    .replace("in knowledge base", "")
-                    .trim()
-                    .to_string();
+                let clean_query = match commands {
+                    Some(cmds) => Self::clean_rag_query(content, cmds),
+                    None => content
+                        .replace("/rag", "")
+                        .replace("search docs", "")
+                        .replace("in knowledge base", "")
+                        .trim()
+                        .to_string(),
+                };
                 Some(RouteDecision::RAGAugmented {
                     query: if clean_query.is_empty() { content.to_string() } else { clean_query },
                 })

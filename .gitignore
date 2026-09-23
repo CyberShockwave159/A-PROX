@@ -15,6 +15,15 @@
 /.env.*
 config/local.toml
 
+# Machine-specific config (real keys/paths); the tracked version is sanitized
+config/default.toml
+
+# Stray image-gen exports — canonical copies live in prompts/ and workflows/
+/t-iprompt.txt
+/i-iprompt.txt
+/Custom Qwen Image 2.1 (GGUF) Image-to-Image.json
+/Custom Qwen Image 2.1 (GGUF) Text-to-Image.json
+
 # Desktop junk
 /.directory
 

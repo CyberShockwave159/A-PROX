@@ -17,6 +17,16 @@ pub struct AppConfig {
     pub ingestion: IngestionConfig,
     #[serde(default)]
     pub intent: IntentConfig,
+    #[serde(default)]
+    pub llama_server: LlamaServerConfig,
+    #[serde(default)]
+    pub comfy_ui: ComfyUiConfig,
+    #[serde(default)]
+    pub image_generation: ImageGenerationConfig,
+    #[serde(default)]
+    pub file_generation: FileGenerationConfig,
+    #[serde(default)]
+    pub tool_commands: ToolCommandsConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -118,6 +128,306 @@ pub struct SearXNGConfig {
     pub max_results: usize,
 }
 
+/// Managed llama.cpp server that A-PROX owns (spawns/stops around image jobs).
+/// This mirrors the exact CLI flags used before, minus `--load-mode mlock`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LlamaServerConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub executable: String,
+    #[serde(default)]
+    pub model_path: String,
+    #[serde(default)]
+    pub mmproj_path: String,
+    #[serde(default = "default_llama_host")]
+    pub host: String,
+    #[serde(default = "default_llama_port")]
+    pub port: u16,
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default = "default_zero_i32")]
+    pub ctx_size: i32,
+    #[serde(default = "default_true")]
+    pub no_mmproj_offload: bool,
+    #[serde(default = "default_on")]
+    pub flash_attn: String,
+    #[serde(default = "default_n_cpu_moe")]
+    pub n_cpu_moe: u32,
+    #[serde(default = "default_q4")]
+    pub cache_type_k: String,
+    #[serde(default = "default_q4")]
+    pub cache_type_v: String,
+    #[serde(default = "default_true")]
+    pub reasoning_preserve: bool,
+    #[serde(default = "default_true")]
+    pub kv_unified: bool,
+    #[serde(default = "default_threads")]
+    pub threads: usize,
+    #[serde(default = "default_batch_size")]
+    pub batch_size: usize,
+    #[serde(default = "default_ubatch_size")]
+    pub ubatch_size: usize,
+    #[serde(default = "default_image_min_tokens")]
+    pub image_min_tokens: u32,
+    #[serde(default = "default_image_max_tokens")]
+    pub image_max_tokens: u32,
+    #[serde(default)]
+    pub cors_origins: String,
+    /// `none` omits the flag entirely; anything else is passed as `--load-mode <v>`.
+    #[serde(default = "default_load_mode")]
+    pub load_mode: String,
+    #[serde(default = "default_health_timeout_s")]
+    pub health_timeout_s: u64,
+    #[serde(default = "default_stop_grace_s")]
+    pub stop_grace_s: u64,
+}
+
+impl Default for LlamaServerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            executable: String::new(),
+            model_path: String::new(),
+            mmproj_path: String::new(),
+            host: default_llama_host(),
+            port: default_llama_port(),
+            api_key: String::new(),
+            ctx_size: 0,
+            no_mmproj_offload: true,
+            flash_attn: "on".to_string(),
+            n_cpu_moe: 34,
+            cache_type_k: "q4_0".to_string(),
+            cache_type_v: "q4_0".to_string(),
+            reasoning_preserve: true,
+            kv_unified: true,
+            threads: 6,
+            batch_size: 4096,
+            ubatch_size: 1024,
+            image_min_tokens: 1024,
+            image_max_tokens: 2048,
+            cors_origins: String::new(),
+            load_mode: "none".to_string(),
+            health_timeout_s: 120,
+            stop_grace_s: 30,
+        }
+    }
+}
+
+/// Managed ComfyUI server used for image generation.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ComfyUiConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_comfy_url")]
+    pub url: String,
+    #[serde(default)]
+    pub workdir: String,
+    #[serde(default)]
+    pub python: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default = "default_health_timeout_s")]
+    pub health_timeout_s: u64,
+}
+
+impl Default for ComfyUiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            url: default_comfy_url(),
+            workdir: String::new(),
+            python: String::new(),
+            args: vec!["main.py".to_string(), "--enable-manager".to_string()],
+            health_timeout_s: 120,
+        }
+    }
+}
+
+/// Image generation pipeline settings (ComfyUI Qwen-Image workflows).
+#[derive(Debug, Clone, Deserialize)]
+pub struct ImageGenerationConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_mp")]
+    pub mp: f64,
+    #[serde(default = "default_multiple")]
+    pub multiple: u32,
+    #[serde(default = "default_max_side")]
+    pub max_side: u32,
+    #[serde(default)]
+    pub unet: String,
+    #[serde(default)]
+    pub clip: String,
+    #[serde(default)]
+    pub vae: String,
+    #[serde(default)]
+    pub t2i_workflow: String,
+    #[serde(default)]
+    pub i2i_workflow: String,
+    #[serde(default)]
+    pub t2i_prompt_file: String,
+    #[serde(default)]
+    pub i2i_prompt_file: String,
+    #[serde(default = "default_negative_prompt")]
+    pub default_negative_prompt: String,
+    #[serde(default = "default_serve_dir")]
+    pub serve_dir: String,
+    #[serde(default)]
+    pub public_base_url: String,
+    #[serde(default = "default_generation_timeout_s")]
+    pub generation_timeout_s: u64,
+    #[serde(default = "default_poll_interval_ms")]
+    pub poll_interval_ms: u64,
+}
+
+impl Default for ImageGenerationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mp: 2.0,
+            multiple: 16,
+            max_side: 4096,
+            unet: String::new(),
+            clip: String::new(),
+            vae: String::new(),
+            t2i_workflow: "workflows/t2i.json".to_string(),
+            i2i_workflow: "workflows/i2i.json".to_string(),
+            t2i_prompt_file: "prompts/t-iprompt.txt".to_string(),
+            i2i_prompt_file: "prompts/i-iprompt.txt".to_string(),
+            default_negative_prompt: default_negative_prompt(),
+            serve_dir: "data/generated_images".to_string(),
+            public_base_url: String::new(),
+            generation_timeout_s: 180,
+            poll_interval_ms: 2000,
+        }
+    }
+}
+
+fn default_llama_host() -> String { "127.0.0.1".to_string() }
+fn default_llama_port() -> u16 { 8080 }
+fn default_zero_i32() -> i32 { 0 }
+fn default_true() -> bool { true }
+fn default_on() -> String { "on".to_string() }
+fn default_n_cpu_moe() -> u32 { 34 }
+fn default_q4() -> String { "q4_0".to_string() }
+fn default_threads() -> usize { 6 }
+fn default_batch_size() -> usize { 4096 }
+fn default_ubatch_size() -> usize { 1024 }
+fn default_image_min_tokens() -> u32 { 1024 }
+fn default_image_max_tokens() -> u32 { 2048 }
+fn default_load_mode() -> String { "none".to_string() }
+fn default_health_timeout_s() -> u64 { 120 }
+fn default_stop_grace_s() -> u64 { 30 }
+fn default_comfy_url() -> String { "http://127.0.0.1:8188".to_string() }
+fn default_mp() -> f64 { 2.0 }
+fn default_multiple() -> u32 { 16 }
+fn default_max_side() -> u32 { 4096 }
+fn default_generation_timeout_s() -> u64 { 180 }
+fn default_poll_interval_ms() -> u64 { 2000 }
+
+fn default_max_content_chars() -> usize { 24_000 }
+fn default_file_serve_dir() -> String { "data/generated_files".to_string() }
+
+/// Generation of text files via the `write_file` tool (`/files/{name}`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct FileGenerationConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_file_serve_dir")]
+    pub serve_dir: String,
+    #[serde(default)]
+    pub public_base_url: String,
+    #[serde(default = "default_max_content_chars")]
+    pub max_content_chars: usize,
+    #[serde(default)]
+    pub deny_exts: Vec<String>,
+}
+
+impl Default for FileGenerationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            serve_dir: default_file_serve_dir(),
+            public_base_url: String::new(),
+            max_content_chars: default_max_content_chars(),
+            deny_exts: Vec::new(),
+        }
+    }
+}
+fn default_serve_dir() -> String { "data/generated_images".to_string() }
+fn default_negative_prompt() -> String {
+    "bad anatomy, bad composition, bad lighting, distorted face, extra limbs, low quality, out of focus, overexposed, plastic, poor symmetry, signature, watermark, ugly, censored".to_string()
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ToolCommandsConfig {
+    #[serde(default = "default_flag_agentic")]
+    pub agentic: String,
+    #[serde(default = "default_flag_search")]
+    pub web_search: String,
+    #[serde(default = "default_flag_fetch")]
+    pub web_fetch: String,
+    #[serde(default = "default_flag_rag_search")]
+    pub rag_search: String,
+    #[serde(default = "default_flag_rag_ingest")]
+    pub rag_ingest: String,
+    #[serde(default = "default_flag_system_time")]
+    pub system_time: String,
+    #[serde(default = "default_flag_image_generate")]
+    pub image_generate: String,
+    #[serde(default = "default_flag_write_file")]
+    pub write_file: String,
+    #[serde(default = "default_flag_bypass")]
+    pub bypass: String,
+    #[serde(default = "default_flag_direct")]
+    pub direct: String,
+    #[serde(default = "default_flag_pass", rename = "pass")]
+    pub pass_route: String,
+    #[serde(default = "default_flag_rag")]
+    pub rag: String,
+    #[serde(default = "default_flag_knowledge")]
+    pub knowledge: String,
+    #[serde(default = "default_flag_docs")]
+    pub docs: String,
+}
+
+impl Default for ToolCommandsConfig {
+    fn default() -> Self {
+        Self {
+            agentic: default_flag_agentic(),
+            web_search: default_flag_search(),
+            web_fetch: default_flag_fetch(),
+            rag_search: default_flag_rag_search(),
+            rag_ingest: default_flag_rag_ingest(),
+            system_time: default_flag_system_time(),
+            image_generate: default_flag_image_generate(),
+            write_file: default_flag_write_file(),
+            bypass: default_flag_bypass(),
+            direct: default_flag_direct(),
+            pass_route: default_flag_pass(),
+            rag: default_flag_rag(),
+            knowledge: default_flag_knowledge(),
+            docs: default_flag_docs(),
+        }
+    }
+}
+
+fn default_flag_agentic() -> String { "/tools".to_string() }
+fn default_flag_search() -> String { "/search".to_string() }
+fn default_flag_fetch() -> String { "/fetch".to_string() }
+fn default_flag_rag_search() -> String { "/ragsearch".to_string() }
+fn default_flag_rag_ingest() -> String { "/ingest".to_string() }
+fn default_flag_system_time() -> String { "/time".to_string() }
+fn default_flag_image_generate() -> String { "/image".to_string() }
+fn default_flag_write_file() -> String { "/file".to_string() }
+fn default_flag_bypass() -> String { "/bypass".to_string() }
+fn default_flag_direct() -> String { "/direct".to_string() }
+fn default_flag_pass() -> String { "/pass".to_string() }
+fn default_flag_rag() -> String { "/rag".to_string() }
+fn default_flag_knowledge() -> String { "/knowledge".to_string() }
+fn default_flag_docs() -> String { "/docs".to_string() }
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct MonitorConfig {
     #[serde(default = "default_max_history")]
@@ -161,6 +471,10 @@ pub struct IntentCategories {
     pub rag_search: IntentCategory,
     #[serde(default)]
     pub rag_ingest: IntentCategory,
+    #[serde(default)]
+    pub image_generation: IntentCategory,
+    #[serde(default)]
+    pub file_generation: IntentCategory,
 }
 
 impl Default for IntentCategories {
@@ -176,6 +490,14 @@ impl Default for IntentCategories {
             },
             rag_ingest: IntentCategory {
                 examples: default_rag_ingest_examples(),
+                threshold: 0.70,
+            },
+            image_generation: IntentCategory {
+                examples: default_image_generation_examples(),
+                threshold: 0.70,
+            },
+            file_generation: IntentCategory {
+                examples: default_file_generation_examples(),
                 threshold: 0.70,
             },
         }
@@ -245,6 +567,41 @@ pub fn default_rag_ingest_examples() -> Vec<IntentExample> {
         IntentExample { text: "store this in my files".to_string() },
         IntentExample { text: "remember this for later".to_string() },
         IntentExample { text: "add this to my notes".to_string() },
+    ]
+}
+
+/// Default example prompts for the image-generation intent category.
+pub fn default_image_generation_examples() -> Vec<IntentExample> {
+    vec![
+        IntentExample { text: "generate an image of a futuristic city".to_string() },
+        IntentExample { text: "create a picture of a cat astronaut".to_string() },
+        IntentExample { text: "draw me a logo for my startup".to_string() },
+        IntentExample { text: "make an image of a cyberpunk street".to_string() },
+        IntentExample { text: "render a scene of a dragon in a forest".to_string() },
+        IntentExample { text: "generate a portrait photo of a wizard".to_string() },
+        IntentExample { text: "create a photo of a sunset over the ocean".to_string() },
+        IntentExample { text: "design a poster for a concert".to_string() },
+        IntentExample { text: "generate a wallpaper of space galaxies".to_string() },
+        IntentExample { text: "edit the attached photo to add snow".to_string() },
+        IntentExample { text: "redesign this room in a modern style".to_string() },
+        IntentExample { text: "turn this sketch into a finished painting".to_string() },
+        IntentExample { text: "make an illustration of my book cover".to_string() },
+    ]
+}
+
+/// Default example prompts for the file-generation (write_file) intent category.
+pub fn default_file_generation_examples() -> Vec<IntentExample> {
+    vec![
+        IntentExample { text: "write a python script to a file".to_string() },
+        IntentExample { text: "create a markdown file with my meeting notes".to_string() },
+        IntentExample { text: "save this as a text file".to_string() },
+        IntentExample { text: "generate a csv file of this data".to_string() },
+        IntentExample { text: "put my to-do list in a file".to_string() },
+        IntentExample { text: "write a json file with the results".to_string() },
+        IntentExample { text: "save a python script to notes.py".to_string() },
+        IntentExample { text: "dump this into a markdown file".to_string() },
+        IntentExample { text: "convert my notes to a text file".to_string() },
+        IntentExample { text: "write a rust program and save it to a file".to_string() },
     ]
 }
 
@@ -325,6 +682,11 @@ impl Default for AppConfig {
                 pdf_upstream_model: "qwen3.6-35b-moe".to_string(),
             },
             intent: IntentConfig::default(),
+            llama_server: LlamaServerConfig::default(),
+            comfy_ui: ComfyUiConfig::default(),
+            image_generation: ImageGenerationConfig::default(),
+            file_generation: FileGenerationConfig::default(),
+            tool_commands: ToolCommandsConfig::default(),
         }
     }
 }

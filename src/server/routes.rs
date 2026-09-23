@@ -19,15 +19,26 @@ use crate::context::{
     inject_system_instructions, ChatMessage, ContextManager, ANTI_HALLUCINATION_SYSTEM_PROMPT,
     SYNTHESIS_FORCING_PROMPT,
 };
+use crate::comfy_ui::WorkflowKind;
 use crate::error::AppError;
 use crate::guardrails::InferencePermitGuard;
+use crate::imagegen::{
+    detect_image_request, extract_reference_image, load_prompt_file, to_data_url,
+    try_parse_image_generate_json, GenerateRequest, GeneratedImage, HARNESS_DIRECTIVE,
+};
+use crate::filegen::{
+    clean_filename, is_file_request, is_denied_extension, try_parse_write_file_json, FILE_DIRECTIVE,
+};
+use crate::files::content_type_for as file_content_type_for;
+use crate::files::GeneratedFile;
+use crate::images::content_type_for;
 use crate::monitor::{
     ActiveRequest, DbStats, SearXNGStatus,
 };
 use crate::router::{RequestRouter, RouteDecision};
 use crate::server::models::ChatCompletionChunk;
 use crate::state::AppState;
-use crate::tools::ToolParser;
+use crate::tools::{ExtractedToolCall, ToolParser};
 
 pub async fn health_check(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let (active_inferences, queued) = state.concurrency_limiter.stats();
@@ -263,7 +274,7 @@ pub async fn chat_completions(
     let latest_user_content = pruned_messages.iter().rev().find(|m| m.role == "user").map(|m| m.content_as_str()).unwrap_or_default();
     tracing::debug!("Router input: model={:?}, tools={:?}, latest_user_msg={}", model_name, tools_payload.is_some(), latest_user_content.chars().take(200).collect::<String>());
     
-    let decision = RequestRouter::classify_request(&pruned_messages, tools_payload, bypass_header, state.config.guardrails.enable_agentic_tools, model_name, Some(&*state.intent_classifier), Some(&state.config.intent));
+    let decision = RequestRouter::classify_request(&pruned_messages, tools_payload, bypass_header, state.config.guardrails.enable_agentic_tools, model_name, Some(&*state.intent_classifier), Some(&state.config.intent), Some(&state.config.tool_commands));
 
     let is_streaming = payload.get("stream")
         .and_then(|v| v.as_bool())
@@ -274,7 +285,7 @@ pub async fn chat_completions(
         RouteDecision::FastPassThrough => "FastPassThrough".to_string(),
         RouteDecision::RAGAugmented { .. } => "RAGAugmented".to_string(),
         RouteDecision::RAGIngestion { .. } => "RAGIngestion".to_string(),
-        RouteDecision::AgenticToolLoop => "AgenticToolLoop".to_string(),
+        RouteDecision::AgenticToolLoop | RouteDecision::AgenticToolForced { .. } => "AgenticToolLoop".to_string(),
     };
 
     let request_id = state.monitor.next_request_id().await;
@@ -372,12 +383,43 @@ pub async fn chat_completions(
             payload["messages"] = serde_json::to_value(&pruned_messages)
                 .map_err(|e| AppError::Context(e.to_string()))?;
 
+            // Detect image-generation requests and arm the image pipeline context.
+            let image_gen_ctx = prepare_image_request(&state, &mut pruned_messages);
+
+            // Detect file-write requests and arm the write_file pipeline context.
+            let file_gen_ctx = prepare_file_request(&state, &mut pruned_messages);
+
             // Ensure internal tool schemas are registered if not provided
             if payload.get("tools").is_none() {
                 payload["tools"] = state.tool_registry.get_internal_tools_definitions();
             }
 
-            execute_agentic_loop(&state, payload, pruned_messages, is_streaming, request_id, _permit).await
+            execute_agentic_loop(&state, payload, pruned_messages, is_streaming, request_id, _permit, image_gen_ctx, file_gen_ctx, Vec::new()).await
+        }
+        RouteDecision::AgenticToolForced { tools, query } => {
+            tracing::info!("Routing via Agentic Function Calling Loop (forced flags {:?})", tools);
+            inject_system_instructions(&mut pruned_messages, ANTI_HALLUCINATION_SYSTEM_PROMPT);
+
+            // Strip the flag from the latest user message so the model sees clean text.
+            rewrite_latest_user_text(&mut pruned_messages, &query);
+            payload["messages"] = serde_json::to_value(&pruned_messages)
+                .map_err(|e| AppError::Context(e.to_string()))?;
+
+            // Image/file flags arm their respective pipelines as well.
+            let mut image_gen_ctx = None;
+            let mut file_gen_ctx = None;
+            if tools.iter().any(|t| t == "image_generate") {
+                image_gen_ctx = prepare_forced_image_request(&state, &mut pruned_messages);
+            }
+            if tools.iter().any(|t| t == "write_file") {
+                file_gen_ctx = prepare_forced_file_request(&state, &mut pruned_messages);
+            }
+
+            if payload.get("tools").is_none() {
+                payload["tools"] = state.tool_registry.get_internal_tools_definitions();
+            }
+
+            execute_agentic_loop(&state, payload, pruned_messages, is_streaming, request_id, _permit, image_gen_ctx, file_gen_ctx, tools).await
         }
     };
 
@@ -630,6 +672,559 @@ async fn forward_to_upstream(
     }
 }
 
+/// State carried through the agentic loop for an image-generation request.
+/// Populated by `prepare_image_request` when the latest user turn looks like an
+/// image request (attached photo → i2i, generation phrase → t2i).
+struct ImageGenContext {
+    request_kind: WorkflowKind,
+    /// (bytes, (width, height)) of the attached reference image, if any.
+    reference_image: Option<(Vec<u8>, (u32, u32))>,
+    /// Filled in by `maybe_execute_image_generate` once the tool has run.
+    result: Option<GeneratedImage>,
+    failed: bool,
+    /// The rewritten prompt used for the generation (surface in the tool result).
+    last_prompt: String,
+}
+
+/// State carried through the agentic loop for a file-write request. Populated by
+/// `prepare_file_request`. `active` tracks the file being appended to so that
+/// `mode=append` chunks continue the same logical file across turns.
+struct FileGenContext {
+    active: Option<GeneratedFile>,
+    result: Option<GeneratedFile>,
+    failed: bool,
+}
+
+/// Detect an image request in the latest user turn and prepare the pipeline:
+///  - selects t2i vs i2i from content/image parts (the model never chooses),
+///  - appends the workflow-specific image-generator system prompt + harness
+///    directive as a dedicated system message (verbatim, not merged),
+///  - captures the attached reference image so `image_generate` can upload it.
+fn prepare_image_request(
+    state: &Arc<AppState>,
+    messages: &mut Vec<ChatMessage>,
+) -> Option<ImageGenContext> {
+    if !state.config.image_generation.enabled {
+        return None;
+    }
+    let kind = detect_image_request(messages)?;
+
+    let prompt_file = match kind {
+        WorkflowKind::TextToImage => &state.config.image_generation.t2i_prompt_file,
+        WorkflowKind::ImageToImage => &state.config.image_generation.i2i_prompt_file,
+    };
+    let system_prompt = load_prompt_file(kind, prompt_file);
+    let full = format!("{}\n{}", system_prompt.trim(), HARNESS_DIRECTIVE);
+    append_system_message(messages, &full);
+    tracing::info!(
+        "Image request detected ({:?}); injected image-generator system prompt",
+        kind
+    );
+
+    let reference_image = messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")
+        .and_then(extract_reference_image);
+
+    Some(ImageGenContext {
+        request_kind: kind,
+        reference_image,
+        result: None,
+        failed: false,
+        last_prompt: String::new(),
+    })
+}
+
+/// Detect a file-write request in the latest user turn and arm the write_file
+/// pipeline context (mirrors `prepare_image_request`, no backend involved).
+fn prepare_file_request(
+    state: &Arc<AppState>,
+    messages: &mut Vec<ChatMessage>,
+) -> Option<FileGenContext> {
+    if !state.config.file_generation.enabled {
+        return None;
+    }
+    if !is_file_request(messages) {
+        return None;
+    }
+    append_system_message(messages, FILE_DIRECTIVE);
+    tracing::info!("File write request detected; injected write_file directive");
+    Some(FileGenContext {
+        active: None,
+        result: None,
+        failed: false,
+    })
+}
+
+/// Forced `/image` flag: arm the image pipeline without keyword detection.
+/// Files as i2i when the latest user turn has an attached image part (using the
+/// reference dims), otherwise t2i; the model rewrites the prompt in Phase A.
+fn prepare_forced_image_request(
+    state: &Arc<AppState>,
+    messages: &mut Vec<ChatMessage>,
+) -> Option<ImageGenContext> {
+    if !state.config.image_generation.enabled {
+        return None;
+    }
+    let reference_image = messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")
+        .and_then(extract_reference_image);
+    let (kind, prompt_file) = match &reference_image {
+        Some(_) => (WorkflowKind::ImageToImage, &state.config.image_generation.i2i_prompt_file),
+        None => (WorkflowKind::TextToImage, &state.config.image_generation.t2i_prompt_file),
+    };
+    let system_prompt = load_prompt_file(kind, prompt_file);
+    let full = format!("{}\n{}", system_prompt.trim(), HARNESS_DIRECTIVE);
+    append_system_message(messages, &full);
+    tracing::info!("Forced /image flag ({:?}); injected image-generator system prompt", kind);
+    Some(ImageGenContext {
+        request_kind: kind,
+        reference_image,
+        result: None,
+        failed: false,
+        last_prompt: String::new(),
+    })
+}
+
+/// Forced `/file` flag: arm the write_file pipeline without keyword detection.
+fn prepare_forced_file_request(
+    state: &Arc<AppState>,
+    messages: &mut Vec<ChatMessage>,
+) -> Option<FileGenContext> {
+    if !state.config.file_generation.enabled {
+        return None;
+    }
+    append_system_message(messages, FILE_DIRECTIVE);
+    tracing::info!("Forced /file flag; injected write_file directive");
+    Some(FileGenContext {
+        active: None,
+        result: None,
+        failed: false,
+    })
+}
+
+/// Rewrite the latest user message text after a `/flag` is stripped. For
+/// multimodal (array) content the `text` part is replaced in place so any
+/// attached `image_url` parts survive (needed for `/image` i2i).
+fn rewrite_latest_user_text(messages: &mut Vec<ChatMessage>, text: &str) {
+    let Some(last_user) = messages.iter_mut().rev().find(|m| m.role == "user") else {
+        return;
+    };
+    match &mut last_user.content {
+        Some(Value::Array(parts)) => {
+            if text.trim().is_empty() {
+                return;
+            }
+            match parts.iter_mut().find(|p| {
+                p.get("type").and_then(|t| t.as_str()) == Some("text")
+            }) {
+                Some(text_part) => {
+                    text_part["text"] = json!(text.trim());
+                }
+                None => parts.insert(0, json!({"type": "text", "text": text.trim()})),
+            }
+        }
+        _ => {
+            let cleaned = text.trim();
+            last_user.content = Some(json!(if cleaned.is_empty() {
+                last_user.content_as_str()
+            } else {
+                cleaned.to_string()
+            }));
+        }
+    }
+}
+
+/// Merge the image-generator directive into the leading system message (llama.cpp
+/// 3.6's chat template raises `System message must be at the beginning` when more
+/// than one system message precedes the user turn, so we cannot insert a second
+/// one). Inserts a fresh system message only when none exists.
+fn append_system_message(messages: &mut Vec<ChatMessage>, text: &str) {
+    if let Some(first) = messages.first_mut() {
+        if first.role == "system" {
+            let existing = first.content_as_str();
+            let merged = if existing.trim().is_empty() {
+                text.to_string()
+            } else {
+                format!("{}\n\n{}", existing.trim_end(), text)
+            };
+            first.content = Some(json!(merged));
+            return;
+        }
+    }
+    messages.insert(
+        0,
+        ChatMessage {
+            role: "system".to_string(),
+            content: Some(json!(text)),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+        },
+    );
+}
+
+/// OpenAI-compatible SSE data payload for the single `delta.image_url` event.
+fn image_url_sse_payload(url: &str) -> String {
+    json!({
+        "choices": [{ "delta": { "image_url": { "url": url } } }]
+    })
+    .to_string()
+}
+
+/// OpenAI-compatible SSE data payload for the single `delta.file_url` event.
+fn file_url_sse_payload(url: &str, name: &str, mime: &str) -> String {
+    json!({
+        "choices": [{ "delta": { "file_url": { "url": url, "name": name, "mime": mime } } }]
+    })
+    .to_string()
+}
+
+/// Intercept `image_generate` tool calls in the agentic loop. Returns `None`
+/// when the call is a normal internal tool (delegate to the registry), otherwise
+/// `Some(output_string)` — running the full llama-stop / ComfyUI / llama-restart
+/// pipeline and recording the result into the context.
+async fn maybe_execute_image_generate(
+    state: &Arc<AppState>,
+    call: &ExtractedToolCall,
+    ctx: &mut Option<ImageGenContext>,
+) -> Option<String> {
+    if call.name != "image_generate" {
+        return None;
+    }
+    let image_ctx = match ctx {
+        Some(c) => c,
+        None => {
+            return Some(
+                "Error: image_generate was requested but no image request context is active."
+                    .to_string(),
+            );
+        }
+    };
+
+    if !state.config.image_generation.enabled {
+        return Some("Error: image generation is disabled in the config.".to_string());
+    }
+    if image_ctx.failed {
+        return Some(
+            "Error: image generation previously failed on this request. Ask the user to retry."
+                .to_string(),
+        );
+    }
+    if let Some(img) = &image_ctx.result {
+        return Some(result_json(img, &image_ctx.last_prompt));
+    }
+
+    let raw_prompt = call
+        .arguments
+        .get("rewritten_prompt")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if raw_prompt.is_empty() {
+        image_ctx.failed = true;
+        return Some("Error: image_generate requires a non-empty 'rewritten_prompt'.".to_string());
+    }
+
+    let wh_ratio = call
+        .arguments
+        .get("wh_ratio")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let ratio_follow = call
+        .arguments
+        .get("ratio_follow")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+    let extra_negative = call
+        .arguments
+        .get("negative_prompt")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+
+    let reference_dims = if ratio_follow.starts_with("<image") {
+        image_ctx.reference_image.as_ref().map(|(_, d)| *d)
+    } else {
+        None
+    };
+    let reference_bytes = image_ctx
+        .reference_image
+        .as_ref()
+        .map(|(b, _)| b.clone());
+
+    let negative_prompt = if extra_negative.is_empty() {
+        state.config.image_generation.default_negative_prompt.clone()
+    } else {
+        format!(
+            "{}, {}",
+            state.config.image_generation.default_negative_prompt.trim(),
+            extra_negative
+        )
+    };
+
+    let request = GenerateRequest {
+        kind: image_ctx.request_kind,
+        prompt: raw_prompt.clone(),
+        negative_prompt,
+        wh_ratio,
+        reference_dims,
+        reference_image: if image_ctx.request_kind == WorkflowKind::ImageToImage {
+            reference_bytes
+        } else {
+            None
+        },
+    };
+
+    match state.image_service.generate(request).await {
+        Ok(img) => {
+            tracing::info!("Image generated: {}", img.public_url);
+            image_ctx.last_prompt = raw_prompt;
+            let output = result_json(&img, &image_ctx.last_prompt);
+            image_ctx.result = Some(img);
+            Some(output)
+        }
+        Err(e) => {
+            tracing::error!("Image generation error: {e}");
+            image_ctx.failed = true;
+            Some(format!("Error: image generation failed: {e}"))
+        }
+    }
+}
+
+fn result_json(img: &GeneratedImage, prompt: &str) -> String {
+    json!({
+        "status": "ok",
+        "image_url": img.public_url,
+        "image_path": img.file_path.display().to_string(),
+        "prompt": prompt,
+    })
+    .to_string()
+}
+
+fn file_result_json(f: &GeneratedFile) -> String {
+    json!({
+        "status": "ok",
+        "file_url": f.public_url,
+        "file_name": f.name,
+        "size": f.size,
+        "mime": f.mime,
+    })
+    .to_string()
+}
+
+/// Monotonic suffix + epoch millis, mirroring the image id scheme (`gen_*`).
+fn next_file_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+    format!(
+        "file_{}_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0),
+        FILE_COUNTER.fetch_add(1, Ordering::SeqCst)
+    )
+}
+
+/// Intercept `write_file` tool calls in the agentic loop. Returns `None` when
+/// the call is not a file call (delegate to image/registry dispatch), otherwise
+/// `Some(output_string)` — persisting the file, updating the context, and
+/// returning metadata including the publicly reachable `/files/{name}` URL.
+async fn maybe_execute_write_file(
+    state: &Arc<AppState>,
+    call: &ExtractedToolCall,
+    ctx: &mut Option<FileGenContext>,
+) -> Option<String> {
+    if call.name != "write_file" {
+        return None;
+    }
+    let fctx = match ctx {
+        Some(c) => c,
+        None => {
+            return Some(
+                "Error: write_file was requested but no file request context is active."
+                    .to_string(),
+            );
+        }
+    };
+
+    if !state.config.file_generation.enabled {
+        return Some("Error: file generation is disabled in the config.".to_string());
+    }
+    if fctx.failed {
+        return Some(
+            "Error: file writing previously failed on this request. Ask the user to retry."
+                .to_string(),
+        );
+    }
+
+    let filename = call
+        .arguments
+        .get("filename")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let content = call
+        .arguments
+        .get("content")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if content.trim().is_empty() {
+        fctx.failed = true;
+        return Some("Error: write_file requires a non-empty 'content' argument.".to_string());
+    }
+
+    let clean = clean_filename(&filename);
+    if is_denied_extension(&clean, &state.config.file_generation.deny_exts) {
+        fctx.failed = true;
+        return Some(format!(
+            "Error: writing files with the '{}' extension is not allowed.",
+            crate::filegen::extension_of(&clean)
+        ));
+    }
+
+    let mode = call
+        .arguments
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("overwrite");
+    let append = mode == "append";
+
+    let cap = state.config.file_generation.max_content_chars;
+    let len = content.chars().count();
+    if len > cap {
+        return Some(format!(
+            "Error: content is {len} characters, exceeding the per-call limit of {cap}. Send the content in smaller chunks: first chunk with mode=\"overwrite\", remaining chunks with mode=\"append\" (all with the same filename)."
+        ));
+    }
+
+    // Append continues the same logical file only when the filename matches the
+    // active file; any other mode starts a fresh file.
+    let reuse = append && fctx.active.as_ref().map(|f| f.name == clean).unwrap_or(false);
+    let id = if reuse {
+        fctx.active.as_ref().unwrap().id.clone()
+    } else {
+        next_file_id()
+    };
+    let servable_name = format!("{id}_{clean}");
+
+    let path = match state.file_store.save(&servable_name, content.as_bytes(), reuse) {
+        Ok(p) => p,
+        Err(e) => {
+            fctx.failed = true;
+            return Some(format!("Error: failed to write file: {e}"));
+        }
+    };
+
+    let base_url = {
+        let cfg = &state.config.file_generation;
+        if !cfg.public_base_url.trim().is_empty() {
+            cfg.public_base_url.trim_end_matches('/').to_string()
+        } else {
+            format!("http://127.0.0.1:{}", state.config.server.port)
+        }
+    };
+    let size = state
+        .file_store
+        .size(&servable_name)
+        .unwrap_or(content.len() as u64);
+    let public_url = format!("{base_url}/files/{servable_name}");
+    let mime = file_content_type_for(&servable_name);
+    let file = GeneratedFile {
+        id,
+        name: clean,
+        servable_name,
+        public_url,
+        file_path: path,
+        mime,
+        size,
+    };
+    fctx.active = Some(file.clone());
+    fctx.result = Some(file);
+    let output = match fctx.result.as_ref() {
+        Some(f) => file_result_json(f),
+        None => "Error: unknown write_file state".to_string(),
+    };
+    Some(output)
+}
+
+/// Route one tool call: file → image → registry. Keeps the three dispatch sites
+/// (loop, streaming loop, finalize) identical.
+async fn dispatch_tool_execution(
+    state: &Arc<AppState>,
+    call: &ExtractedToolCall,
+    image_ctx: &mut Option<ImageGenContext>,
+    file_ctx: &mut Option<FileGenContext>,
+) -> String {
+    if let Some(out) = maybe_execute_write_file(state, call, file_ctx).await {
+        return out;
+    }
+    if let Some(out) = maybe_execute_image_generate(state, call, image_ctx).await {
+        return out;
+    }
+    state.tool_registry.execute_tool(call).await
+}
+
+/// Redact the `content` argument of successfully-executed write_file tool calls
+/// when storing the assistant message in history, so multi-chunk file bodies
+/// don't bloat the context window across turns. Failed calls keep their content
+/// so the model can retry. `outputs` is aligned with the tool_calls array.
+fn sanitize_tool_calls_for_history(tool_calls: Option<&Value>, outputs: &[String]) -> Value {
+    let mut v = tool_calls.cloned().unwrap_or(Value::Array(vec![]));
+    if let Some(arr) = v.as_array_mut() {
+        for (i, tc) in arr.iter_mut().enumerate() {
+            let name = tc.pointer("/function/name").and_then(|n| n.as_str()).unwrap_or("");
+            if name != "write_file" {
+                continue;
+            }
+            let wrote = outputs.get(i).map(|o| !o.starts_with("Error: ")).unwrap_or(false);
+            if !wrote {
+                continue;
+            }
+            match tc.pointer_mut("/function/arguments") {
+                Some(Value::Object(args)) => {
+                    args.insert("content".to_string(), json!("[saved to file; withheld from context]"));
+                }
+                Some(Value::String(s)) => {
+                    if let Ok(mut obj) = serde_json::from_str::<Value>(s) {
+                        if let Some(o) = obj.as_object_mut() {
+                            o.insert("content".to_string(), json!("[saved to file; withheld from context]"));
+                        }
+                        *s = obj.to_string();
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    v
+}
+
+/// Push the synthetic vision user message (text + base64 data URL of the
+/// generated image) so llama.cpp can caption it during the final synthesis turn.
+fn inject_generated_image_as_user_msg(messages: &mut Vec<ChatMessage>, img: &GeneratedImage) {
+    let data_url = to_data_url(&img.png_bytes);
+    let parts = json!([
+        { "type": "text", "text": "The image you were asked to generate is above. Keep your reply to the user concise: confirm the image was created, describe what it shows, and mention the image URL if helpful." },
+        { "type": "image_url", "image_url": { "url": data_url } }
+    ]);
+    messages.push(ChatMessage {
+        role: "user".to_string(),
+        content: Some(parts),
+        name: None,
+        tool_calls: None,
+        tool_call_id: None,
+    });
+}
+
 async fn execute_agentic_loop(
     state: &Arc<AppState>,
     mut payload: Value,
@@ -637,14 +1232,64 @@ async fn execute_agentic_loop(
     is_streaming: bool,
     request_id: u64,
     permit: InferencePermitGuard,
+    mut image_ctx: Option<ImageGenContext>,
+    mut file_ctx: Option<FileGenContext>,
+    forced_tools: Vec<String>,
 ) -> Result<Response, AppError> {
     let context_mgr = state.context_mgr.clone();
     let state_ref = state.clone();
     let mut tools_in_payload = false;
-    if payload.get("tools").is_some() {
+    // A /flag command restricts the armed surface to exactly the flagged tools.
+    if !forced_tools.is_empty() {
+        let defs: Vec<Value> = forced_tools
+            .iter()
+            .filter_map(|t| state_ref.tool_registry.definition_for(t))
+            .collect();
+        payload["tools"] = serde_json::json!(defs);
+    } else if payload.get("tools").is_some() {
         tools_in_payload = true;
     } else {
         payload["tools"] = state_ref.tool_registry.get_internal_tools_definitions();
+    }
+
+    // Arm the image_generate tool schema when a context is active, so the model
+    // already has it in its function-calling surface regardless of client tools.
+    if image_ctx.is_some() {
+        match payload.get_mut("tools").and_then(|t| t.as_array_mut()) {
+            Some(arr) => {
+                let armed = arr.iter().any(|t| {
+                    t.pointer("/function/name").and_then(|n| n.as_str()) == Some("image_generate")
+                });
+                if !armed {
+                    arr.push(state_ref.tool_registry.image_generate_definition());
+                }
+            }
+            None => {
+                payload["tools"] = serde_json::json!([
+                    state_ref.tool_registry.image_generate_definition()
+                ]);
+            }
+        }
+    }
+
+    // Arm the write_file tool schema when a context is active, mirroring the
+    // image_generate arming above.
+    if file_ctx.is_some() {
+        match payload.get_mut("tools").and_then(|t| t.as_array_mut()) {
+            Some(arr) => {
+                let armed = arr.iter().any(|t| {
+                    t.pointer("/function/name").and_then(|n| n.as_str()) == Some("write_file")
+                });
+                if !armed {
+                    arr.push(state_ref.tool_registry.write_file_definition());
+                }
+            }
+            None => {
+                payload["tools"] = serde_json::json!([
+                    state_ref.tool_registry.write_file_definition()
+                ]);
+            }
+        }
     }
 
     let upstream_url = format!("{}/v1/chat/completions", state_ref.config.upstream.base_url.trim_end_matches('/'));
@@ -714,6 +1359,97 @@ async fn execute_agentic_loop(
 
             let detected_tools = result.tool_calls;
 
+            // Bare-JSON fallback: when an image request is armed but the model did
+            // not emit a structured tool call, treat single-line `image_generate`
+            // JSON (with optional surrounding prose) as the tool action.
+            if detected_tools.is_empty() && image_ctx.is_some() {
+                if let Some(call) = try_parse_image_generate_json(&result.raw_content) {
+                    tracing::info!(
+                        "Bare image_generate JSON fallback triggered on turn {} (no structured tool call)",
+                        turn + 1
+                    );
+                    tools_called = true;
+                    total_tool_calls.push("image_generate".to_string());
+                    messages.push(ChatMessage {
+                        role: "assistant".to_string(),
+                        content: Some(json!(result.raw_content)),
+                        name: None,
+                        tool_calls: tool_calls_field.cloned(),
+                        tool_call_id: None,
+                    });
+
+                    let tool_output =
+                        maybe_execute_image_generate(&state_ref, &call, &mut image_ctx)
+                            .await
+                            .unwrap_or_else(|| "Error: image_generate unavailable".to_string());
+                    messages.push(ChatMessage {
+                        role: "tool".to_string(),
+                        content: Some(json!(tool_output)),
+                        name: Some("image_generate".to_string()),
+                        tool_calls: None,
+                        tool_call_id: Some(call.id.clone()),
+                    });
+
+                    state_ref
+                        .monitor
+                        .update_active_request(
+                            request_id,
+                            0,
+                            total_tool_calls.clone(),
+                            total_rag_hits,
+                            upstream_latency_ms,
+                        )
+                        .await;
+                    state_ref.monitor.heartbeat();
+                    continue;
+                }
+            }
+
+            // Bare-JSON fallback for file writes: the model skipped the structured
+            // call and emitted `{"filename":...,"content":...}` (with or without
+            // surrounding prose). Treat it as the write_file action.
+            if detected_tools.is_empty() && file_ctx.is_some() {
+                if let Some(call) = try_parse_write_file_json(&result.raw_content) {
+                    tracing::info!(
+                        "Bare write_file JSON fallback triggered on turn {} (no structured tool call)",
+                        turn + 1
+                    );
+                    tools_called = true;
+                    total_tool_calls.push("write_file".to_string());
+                    messages.push(ChatMessage {
+                        role: "assistant".to_string(),
+                        content: Some(json!(result.raw_content)),
+                        name: None,
+                        tool_calls: tool_calls_field.cloned(),
+                        tool_call_id: None,
+                    });
+
+                    let tool_output =
+                        dispatch_tool_execution(&state_ref, &call, &mut image_ctx, &mut file_ctx)
+                            .await;
+                    messages.push(ChatMessage {
+                        role: "tool".to_string(),
+                        content: Some(json!(tool_output)),
+                        name: Some("write_file".to_string()),
+                        tool_calls: None,
+                        tool_call_id: Some(call.id.clone()),
+                    });
+
+                    state_ref
+                        .monitor
+                        .update_active_request(
+                            request_id,
+                            0,
+                            total_tool_calls.clone(),
+                            total_rag_hits,
+                            upstream_latency_ms,
+                        )
+                        .await;
+                    state_ref.monitor.heartbeat();
+                    continue;
+                }
+            }
+
             if detected_tools.is_empty() && tools_called {
                 // The model has finished requesting tools; break to the final synthesis turn.
                 break;
@@ -730,30 +1466,43 @@ async fn execute_agentic_loop(
                 total_tool_calls.push(tool_call.name.clone());
             }
 
-            // Preserve the full raw content (including think blocks) in message history
-            messages.push(ChatMessage {
-                role: "assistant".to_string(),
-                content: Some(json!(result.raw_content)),
-                name: None,
-                tool_calls: tool_calls_field.cloned(),
-                tool_call_id: None,
-            });
-
-            for tool_call in detected_tools {
-                let tool_output = state_ref.tool_registry.execute_tool(&tool_call).await;
-
+            // Execute every tool call first so write_file results can be redacted from
+            // the assistant tool_calls payload before it is pushed to history.
+            let mut outcomes: Vec<(String, String, String)> = Vec::new();
+            for tool_call in &detected_tools {
+                let tool_output =
+                    dispatch_tool_execution(&state_ref, tool_call, &mut image_ctx, &mut file_ctx)
+                        .await;
                 if tool_call.name == "rag_query" || tool_call.name == "rag_search" {
                     if let Ok(results) = serde_json::from_str::<Vec<crate::db::SearchResult>>(&tool_output) {
                         total_rag_hits += results.len();
                     }
                 }
+                outcomes.push((tool_call.id.clone(), tool_call.name.clone(), tool_output));
+            }
 
+            // Preserve the full raw content (including think blocks) in message
+            // history; write_file bodies are withheld from the tool_calls payload.
+            let output_vals: Vec<String> =
+                outcomes.iter().map(|o| o.2.clone()).collect();
+            messages.push(ChatMessage {
+                role: "assistant".to_string(),
+                content: Some(json!(result.raw_content)),
+                name: None,
+                tool_calls: Some(sanitize_tool_calls_for_history(
+                    tool_calls_field,
+                    &output_vals,
+                )),
+                tool_call_id: None,
+            });
+
+            for (tool_call_id, tool_name, tool_output) in outcomes {
                 messages.push(ChatMessage {
                     role: "tool".to_string(),
                     content: Some(json!(tool_output)),
-                    name: Some(tool_call.name.clone()),
+                    name: Some(tool_name),
                     tool_calls: None,
-                    tool_call_id: Some(tool_call.id.clone()),
+                    tool_call_id: Some(tool_call_id),
                 });
             }
 
@@ -771,8 +1520,18 @@ async fn execute_agentic_loop(
         // handed a message whose `content` is empty but still contains tool calls.
         if tools_called {
             let mut finalize_round = 0;
+            let mut vision_injected = false;
             loop {
                 finalize_round += 1;
+                // Phase C: hand the generated image back to llama.cpp (vision) so it
+                // can caption it. Injected once, before the very first final payload.
+                let generated = image_ctx.as_ref().and_then(|c| c.result.as_ref());
+                if let Some(img) = generated {
+                    if !vision_injected {
+                        inject_generated_image_as_user_msg(&mut messages, img);
+                        vision_injected = true;
+                    }
+                }
                 inject_system_instructions(&mut messages, SYNTHESIS_FORCING_PROMPT);
                 let mut final_payload = payload.clone();
                 final_payload["messages"] = serde_json::to_value(&messages)
@@ -814,27 +1573,40 @@ async fn execute_agentic_loop(
                     for tool_call in &result.tool_calls {
                         total_tool_calls.push(tool_call.name.clone());
                     }
-                    messages.push(ChatMessage {
-                        role: "assistant".to_string(),
-                        content: Some(json!(result.raw_content)),
-                        name: None,
-                        tool_calls: tool_calls_field.cloned(),
-                        tool_call_id: None,
-                    });
-
-                    for tool_call in result.tool_calls {
-                        let tool_output = state_ref.tool_registry.execute_tool(&tool_call).await;
+                    let mut outcomes: Vec<(String, String, String)> = Vec::new();
+                    for tool_call in &result.tool_calls {
+                        let tool_output = dispatch_tool_execution(
+                            &state_ref, tool_call, &mut image_ctx, &mut file_ctx,
+                        )
+                        .await;
                         if tool_call.name == "rag_query" || tool_call.name == "rag_search" {
                             if let Ok(results) = serde_json::from_str::<Vec<crate::db::SearchResult>>(&tool_output) {
                                 total_rag_hits += results.len();
                             }
                         }
+                        outcomes.push((tool_call.id.clone(), tool_call.name.clone(), tool_output));
+                    }
+
+                    let output_vals: Vec<String> =
+                        outcomes.iter().map(|o| o.2.clone()).collect();
+                    messages.push(ChatMessage {
+                        role: "assistant".to_string(),
+                        content: Some(json!(result.raw_content)),
+                        name: None,
+                        tool_calls: Some(sanitize_tool_calls_for_history(
+                            tool_calls_field,
+                            &output_vals,
+                        )),
+                        tool_call_id: None,
+                    });
+
+                    for (tool_call_id, tool_name, tool_output) in outcomes {
                         messages.push(ChatMessage {
                             role: "tool".to_string(),
                             content: Some(json!(tool_output)),
-                            name: Some(tool_call.name.clone()),
+                            name: Some(tool_name),
                             tool_calls: None,
-                            tool_call_id: Some(tool_call.id.clone()),
+                            tool_call_id: Some(tool_call_id),
                         });
                     }
                     continue;
@@ -852,7 +1624,21 @@ async fn execute_agentic_loop(
                     request_id, tokens_received, total_tool_calls, total_rag_hits, upstream_latency_ms,
                 ).await;
 
-                return Ok(Json(data).into_response());
+                let mut final_data = data;
+                let generated = image_ctx.as_ref().and_then(|c| c.result.as_ref());
+                if let Some(img) = generated {
+                    final_data["image_url"] = json!({ "url": img.public_url });
+                }
+                if let Some(f) = file_ctx.as_ref().and_then(|c| c.result.as_ref()) {
+                    final_data["file_url"] = json!({
+                        "url": f.public_url,
+                        "name": f.name,
+                        "mime": f.mime,
+                        "size": f.size,
+                    });
+                }
+
+                return Ok(Json(final_data).into_response());
             }
         }
 
@@ -957,6 +1743,96 @@ async fn execute_agentic_loop(
 
                 let detected_tools = result.tool_calls;
 
+                // Bare-JSON fallback (mirrors the non-streaming path): when an image
+                // request is armed and the model emitted bare `image_generate` JSON
+                // instead of a structured tool call, execute it as the tool action.
+                if detected_tools.is_empty() && image_ctx.is_some() {
+                    if let Some(call) = try_parse_image_generate_json(&result.raw_content) {
+                        tracing::info!(
+                            "Streaming bare image_generate JSON fallback on turn {} (no structured tool call)",
+                            turn + 1
+                        );
+                        tools_called = true;
+                        total_tool_calls.push("image_generate".to_string());
+                        messages.push(ChatMessage {
+                            role: "assistant".to_string(),
+                            content: Some(json!(result.raw_content)),
+                            name: None,
+                            tool_calls: tool_calls_field.cloned(),
+                            tool_call_id: None,
+                        });
+
+                        let tool_output =
+                            maybe_execute_image_generate(&stream_state, &call, &mut image_ctx)
+                                .await
+                                .unwrap_or_else(|| "Error: image_generate unavailable".to_string());
+                        messages.push(ChatMessage {
+                            role: "tool".to_string(),
+                            content: Some(json!(tool_output)),
+                            name: Some("image_generate".to_string()),
+                            tool_calls: None,
+                            tool_call_id: Some(call.id.clone()),
+                        });
+
+                        stream_state
+                            .monitor
+                            .update_active_request(
+                                request_id,
+                                0,
+                                total_tool_calls.clone(),
+                                total_rag_hits,
+                                upstream_latency_ms,
+                            )
+                            .await;
+                        stream_state.monitor.heartbeat();
+                        continue;
+                    }
+                }
+
+                // Bare-JSON fallback for file writes (mirrors the non-streaming path).
+                if detected_tools.is_empty() && file_ctx.is_some() {
+                    if let Some(call) = try_parse_write_file_json(&result.raw_content) {
+                        tracing::info!(
+                            "Streaming bare write_file JSON fallback on turn {} (no structured tool call)",
+                            turn + 1
+                        );
+                        tools_called = true;
+                        total_tool_calls.push("write_file".to_string());
+                        messages.push(ChatMessage {
+                            role: "assistant".to_string(),
+                            content: Some(json!(result.raw_content)),
+                            name: None,
+                            tool_calls: tool_calls_field.cloned(),
+                            tool_call_id: None,
+                        });
+
+                        let tool_output = dispatch_tool_execution(
+                            &stream_state, &call, &mut image_ctx, &mut file_ctx,
+                        )
+                        .await;
+                        messages.push(ChatMessage {
+                            role: "tool".to_string(),
+                            content: Some(json!(tool_output)),
+                            name: Some("write_file".to_string()),
+                            tool_calls: None,
+                            tool_call_id: Some(call.id.clone()),
+                        });
+
+                        stream_state
+                            .monitor
+                            .update_active_request(
+                                request_id,
+                                0,
+                                total_tool_calls.clone(),
+                                total_rag_hits,
+                                upstream_latency_ms,
+                            )
+                            .await;
+                        stream_state.monitor.heartbeat();
+                        continue;
+                    }
+                }
+
                 if detected_tools.is_empty() {
                     if !tools_called {
                         // Model directly answered without needing tools on the first turn
@@ -994,31 +1870,44 @@ async fn execute_agentic_loop(
                     total_tool_calls.push(tool_call.name.clone());
                 }
 
-                // Preserve the full raw content (including think blocks) in message history
-                messages.push(ChatMessage {
-                    role: "assistant".to_string(),
-                    content: Some(json!(result.raw_content)),
-                    name: None,
-                    tool_calls: tool_calls_field.cloned(),
-                    tool_call_id: None,
-                });
-
-                for tool_call in detected_tools {
+                // Execute every tool call first so write_file results can be redacted
+                // from the assistant tool_calls payload before it is pushed to history.
+                let mut outcomes: Vec<(String, String, String)> = Vec::new();
+                for tool_call in &detected_tools {
                     let _ = tx_for_task.send(bytes::Bytes::from(format!(": executing tool {}\n\n", tool_call.name))).await;
-                    let tool_output = stream_state.tool_registry.execute_tool(&tool_call).await;
+                    let tool_output = dispatch_tool_execution(
+                        &stream_state, tool_call, &mut image_ctx, &mut file_ctx,
+                    )
+                    .await;
 
                     if tool_call.name == "rag_query" || tool_call.name == "rag_search" {
                         if let Ok(results) = serde_json::from_str::<Vec<crate::db::SearchResult>>(&tool_output) {
                             total_rag_hits += results.len();
                         }
                     }
+                    outcomes.push((tool_call.id.clone(), tool_call.name.clone(), tool_output));
+                }
 
+                let output_vals: Vec<String> =
+                    outcomes.iter().map(|o| o.2.clone()).collect();
+                messages.push(ChatMessage {
+                    role: "assistant".to_string(),
+                    content: Some(json!(result.raw_content)),
+                    name: None,
+                    tool_calls: Some(sanitize_tool_calls_for_history(
+                        tool_calls_field,
+                        &output_vals,
+                    )),
+                    tool_call_id: None,
+                });
+
+                for (tool_call_id, tool_name, tool_output) in outcomes {
                     messages.push(ChatMessage {
                         role: "tool".to_string(),
                         content: Some(json!(tool_output)),
-                        name: Some(tool_call.name.clone()),
+                        name: Some(tool_name),
                         tool_calls: None,
-                        tool_call_id: Some(tool_call.id.clone()),
+                        tool_call_id: Some(tool_call_id),
                     });
                 }
 
@@ -1030,6 +1919,21 @@ async fn execute_agentic_loop(
 
             // Phase 3: True token streaming for final synthesis with stream: true
             if tools_called || !first_turn {
+                // Phase C: hand the generated image back to llama.cpp (vision) so it
+                // can caption it during synthesis streaming.
+                let generated = image_ctx.as_ref().and_then(|c| c.result.as_ref());
+                if let Some(img) = generated {
+                    inject_generated_image_as_user_msg(&mut messages, img);
+                }
+                let pending_image_url = image_ctx
+                    .as_ref()
+                    .and_then(|c| c.result.as_ref())
+                    .map(|i| i.public_url.clone());
+                let pending_file = file_ctx
+                    .as_ref()
+                    .and_then(|c| c.result.as_ref())
+                    .cloned();
+
                 let mut final_payload = payload.clone();
                 if tools_called {
                     inject_system_instructions(&mut messages, SYNTHESIS_FORCING_PROMPT);
@@ -1146,6 +2050,18 @@ async fn execute_agentic_loop(
                                     .and_then(|c| c.as_str())
                                     .unwrap_or("");
                                 if !fb_content.trim().is_empty() {
+                                    if let Some(url) = &pending_image_url {
+                                        let event = image_url_sse_payload(url);
+                                        let _ = tx_for_task
+                                            .send(bytes::Bytes::from(format!("data: {event}\n\n")))
+                                            .await;
+                                    }
+                                    if let Some(f) = &pending_file {
+                                        let event = file_url_sse_payload(&f.public_url, &f.name, f.mime);
+                                        let _ = tx_for_task
+                                            .send(bytes::Bytes::from(format!("data: {event}\n\n")))
+                                            .await;
+                                    }
                                     let chunk_id = format!("chatcmpl-{}", request_id);
                                     for chunk in fb_content.as_bytes().chunks(32) {
                                         if let Ok(s) = std::str::from_utf8(chunk) {
@@ -1164,8 +2080,37 @@ async fn execute_agentic_loop(
 
                 // Only forward the (possibly re-synthesized) content once we know it is non-empty.
                 if accumulated_text.trim().is_empty() {
+                    // Still deliver the artifact URLs (if any were generated) so the
+                    // client never loses them, even when synthesis returned no words.
+                    if let Some(url) = &pending_image_url {
+                        let event = image_url_sse_payload(url);
+                        let _ = tx_for_task
+                            .send(bytes::Bytes::from(format!("data: {event}\n\n")))
+                            .await;
+                    }
+                    if let Some(f) = &pending_file {
+                        let event = file_url_sse_payload(&f.public_url, &f.name, f.mime);
+                        let _ = tx_for_task
+                            .send(bytes::Bytes::from(format!("data: {event}\n\n")))
+                            .await;
+                    }
                     let _ = tx_for_task.send(bytes::Bytes::from(": synthesis returned no content\n\n")).await;
                 } else {
+                    // Phase C wire contract: single `delta.image_url` (and `delta.file_url`)
+                    // events as the very first deltas (after the upstream role chunk), before
+                    // any text.
+                    if let Some(url) = &pending_image_url {
+                        let event = image_url_sse_payload(url);
+                        let _ = tx_for_task
+                            .send(bytes::Bytes::from(format!("data: {event}\n\n")))
+                            .await;
+                    }
+                    if let Some(f) = &pending_file {
+                        let event = file_url_sse_payload(&f.public_url, &f.name, f.mime);
+                        let _ = tx_for_task
+                            .send(bytes::Bytes::from(format!("data: {event}\n\n")))
+                            .await;
+                    }
                     for chunk in buffered.iter() {
                         if tx_for_task.send(chunk.clone()).await.is_err() {
                             tracing::info!("Client disconnected during agentic streaming synthesis");
@@ -1256,6 +2201,45 @@ fn inject_context_into_messages(messages: &mut Vec<ChatMessage>, context_block: 
     }
 }
 
+/// Serve a stored generated image directly from the ImageStore directory.
+pub async fn serve_image(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Response {
+    match state.image_store.read(&name) {
+        Some(bytes) => (
+            StatusCode::OK,
+            [
+                ("Content-Type", content_type_for(&name)),
+                ("Cache-Control", "public, max-age=31536000, immutable"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// Serve a stored generated text file directly from the FileStore directory.
+pub async fn serve_file(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Response {
+    match state.file_store.read(&name) {
+        Some(bytes) => (
+            StatusCode::OK,
+            [
+                ("Content-Type".to_string(), file_content_type_for(&name).to_string()),
+                ("Content-Disposition".to_string(), format!("inline; filename=\"{}\"", name)),
+                ("Cache-Control".to_string(), "public, max-age=86400".to_string()),
+            ],
+            bytes,
+        )
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
 /// Reindex all configured directories
 pub async fn ingestion_reindex(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let result = state.directory_ingestor.reindex_all().await;
@@ -1287,4 +2271,84 @@ pub async fn ingestion_status(State(state): State<Arc<AppState>>) -> impl IntoRe
             "last_indexed": f.last_indexed
         })).collect::<Vec<_>>()
     }))
+}
+
+#[cfg(test)]
+mod filegen_tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_redacts_successful_write_file_content() {
+        let tool_calls = json!([
+            {
+                "id": "call_a",
+                "type": "function",
+                "function": {
+                    "name": "write_file",
+                    "arguments": {"filename": "a.txt", "content": "VERY LONG BODY", "mode": "append"}
+                }
+            },
+            {
+                "id": "call_b",
+                "type": "function",
+                "function": {
+                    "name": "web_search",
+                    "arguments": {"query": "x", "count": 2}
+                }
+            },
+            {
+                "id": "call_c",
+                "type": "function",
+                "function": {
+                    "name": "write_file",
+                    "arguments": {"filename": "b.txt", "content": "also long"}
+                }
+            }
+        ]);
+
+        // call_a succeeded, call_b is a registry tool, call_c failed (Error prefixed).
+        let outputs = vec![
+            "{\"status\":\"ok\",\"file_url\":\"http://x/files/f_a.txt\"}".to_string(),
+            "search results here".to_string(),
+            "Error: content exceeds limit 24000".to_string(),
+        ];
+        let sanitized = sanitize_tool_calls_for_history(Some(&tool_calls), &outputs);
+        let arr = sanitized.as_array().unwrap();
+
+        assert_eq!(
+            arr[0]["function"]["arguments"]["content"],
+            json!("[saved to file; withheld from context]")
+        );
+        assert_eq!(arr[1]["function"]["arguments"]["content"], json!(null));
+        assert_eq!(arr[1]["function"]["arguments"]["query"], json!("x"));
+        assert_eq!(
+            arr[2]["function"]["arguments"]["content"],
+            json!("also long")
+        );
+    }
+
+    #[test]
+    fn sanitize_handles_string_arguments() {
+        let tool_calls = json!([
+            {
+                "id": "call_x",
+                "type": "function",
+                "function": {
+                    "name": "write_file",
+                    "arguments": "{\"filename\":\"s.py\",\"content\":\"print(1)\"}"
+                }
+            }
+        ]);
+        let sanitized = sanitize_tool_calls_for_history(Some(&tool_calls), &["{\"status\":\"ok\"}".to_string()]);
+        let args = sanitized[0]["function"]["arguments"].as_str().unwrap();
+        let parsed: Value = serde_json::from_str(args).unwrap();
+        assert_eq!(parsed["content"], json!("[saved to file; withheld from context]"));
+        assert_eq!(parsed["filename"], json!("s.py"));
+    }
+
+    #[test]
+    fn sanitize_none_is_empty_array() {
+        let out = sanitize_tool_calls_for_history(None, &[]);
+        assert_eq!(out, json!([]));
+    }
 }

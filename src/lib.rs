@@ -1,10 +1,16 @@
+pub mod comfy_ui;
 pub mod config;
 pub mod context;
 pub mod db;
 pub mod embeddings;
 pub mod error;
+pub mod filegen;
+pub mod files;
 pub mod guardrails;
+pub mod imagegen;
+pub mod images;
 pub mod ingestion;
+pub mod llama_server;
 pub mod monitor;
 pub mod rag;
 pub mod router;

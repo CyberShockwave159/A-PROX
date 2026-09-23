@@ -7,21 +7,23 @@ A high-performance proxy server that sits between your LLM frontends and `llama.
 ## How It Works (At a Glance)
 
 ```
-Your Apps (SillyTavern, OpenWebUI, curl, etc.)
+Your Apps (SillyTavern, OpenWebUI, CLAN, curl, etc.)
        │
        ▼  port 8000 (A-PROX)
-  ┌─────────────┐
-  │   A-PROX    │  ← API key required, RAG/search/tool routing
-  └──────┬──────┘
-         │  port 8080 (local only)
-         ▼  ┌─────────────┐
-            │ llama.cpp   │  ← Qwen 3.6 35B MoE, no API key needed from A-PROX
-            └─────────────┘
+  ┌───────────────────────────┐
+  │   A-PROX                  │  ← RAG/search/tool routing + image generation
+  └───┬───────────┬───────────┘
+      │ 8080      │ 8188 (managed, image jobs)
+      ▼           ▼
+ ┌────────────┐  ┌──────────────────┐
+ │ llama.cpp  │  │ ComfyUI Qwen-IMG │  ← spawned lazily on first image job
+ └────────────┘  └──────────────────┘
 ```
 
-- **Port 8000** — A-PROX gateway. Clients connect here. Requires an API key.
-- **Port 8080** — llama.cpp server. Only reachable on `localhost` (behind A-PROX).
-- **API Key** — All requests to port 8000 require `X-API-Key: <your-key>` or `Authorization: Bearer <your-key>` (except `/health` and `/metrics`).
+- **Port 8000** — A-PROX gateway. Clients connect here.
+- **Port 8080** — llama.cpp server. Only reachable on `localhost` (behind A-PROX). A-PROX launches it from `[llama_server]` (paused during image jobs and restarted after).
+- **Port 8188** — Managed ComfyUI backend used for `image_generate`; spawned on the first image job and left running.
+- **API Key** — Not enforced on `/v1/*`, `/ingestion/*`, `/monitor/*`; when a key *is* provided to `/monitor/api` or `/monitor/stream` it is compared against `upstream.api_key`.
 
 ---
 
@@ -42,7 +44,7 @@ A-PROX was built for a machine where the GPU is fully occupied:
 3. **Hybrid Vector Search** — Combines vector similarity and full-text search using Reciprocal Rank Fusion (RRF).
 4. **Context Management** — Automatically prunes long conversations while keeping system prompts and the latest user message.
 5. **Web Search & Scraper** — Queries a local SearXNG instance or falls back to mock results; extracts clean text from web pages.
-6. **Tool Execution** — The LLM can call tools (`web_search`, `web_fetch`, `rag_search`, `rag_ingest`, `system_time`) in an autonomous loop of up to 5 turns.
+6. **Tool Execution** — The LLM can call tools (`web_search`, `web_fetch`, `rag_search`, `rag_ingest`, `system_time`) in an autonomous loop of up to 5 turns. Image requests automatically arm an `image_generate` tool backed by a managed ComfyUI (Qwen-Image 2.1) backend, with A-PROX pausing llama.cpp while the image job runs and resuming it afterward. File-write requests arm a `write_file` tool that saves text/scripts to disk and serves them via `GET /files/{name}` (append support across turns).
 7. **System Guardrails** — Monitors free RAM and limits concurrent requests to protect the system.
 8. **Directory-Based Automatic Indexing** — Configures directories to scan for files; automatically extracts text, generates embeddings, and indexes documents into the RAG store. Supports live file watching, PDF processing via upstream multimodal endpoints, and per-directory collections.
 
@@ -51,8 +53,9 @@ A-PROX was built for a machine where the GPU is fully occupied:
 ## Prerequisites
 
 1. **Rust toolchain** — Install via [rustup](https://rustup.rs/): `curl --proto '=https' --tlsv1.2 -sSf https://rustup.rs | sh`
-2. **llama.cpp running** — Start `llama-server` on `http://127.0.0.1:8080` before launching A-PROX.
-3. **Optional: SearXNG** — For live web search, run a local SearXNG instance on port 8888. A-PROX works without it (returns placeholder results).
+2. **llama.cpp** — A-PROX owns and launches `llama-server` itself from the `[llama_server]` config block (spawned on `127.0.0.1:8080`, no `--load-mode mlock`). You no longer need to launch it manually first — but an externally-running instance at the same URL is also detected and reused.
+3. **Optional: SearXNG** — For live web search, A-PROX manages a local SearXNG instance on port 8888. It works without it (returns placeholder results).
+4. **Optional: ComfyUI (image generation)** — For `image_generate` to work, a Qwen-Image 2.1 GGUF ComfyUI install is configured in `[comfy_ui]` (spawned lazily on the first image job, port 8188).
 
 ---
 
@@ -125,8 +128,8 @@ Expected response:
 You don't need to edit the config file to change anything. Use CLI flags:
 
 ```bash
-# Change the listening port and API key
-./target/release/a-prox --port 9000 --api-key my-secret-key
+# Change the listening port
+./target/release/a-prox --port 9000
 
 # Point to a different llama.cpp instance
 ./target/release/a-prox --upstream http://192.168.1.50:8080
@@ -138,7 +141,6 @@ You don't need to edit the config file to change anything. Use CLI flags:
 ./target/release/a-prox \
   --port 9000 \
   --host 0.0.0.0 \
-  --api-key my-mobile-key \
   --upstream http://127.0.0.1:8080
 ```
 
@@ -146,18 +148,22 @@ You don't need to edit the config file to change anything. Use CLI flags:
 
 | Flag | Description | Example |
 |------|-------------|---------|
+| `--config` | Load a custom TOML config file | `--config /path/to/custom.toml` |
 | `--port` | Change the listening port | `--port 9000` |
 | `--host` | Bind to a specific network interface | `--host 192.168.1.100` |
-| `--api-key` | Set the API key for client authentication | `--api-key abc123` |
 | `--upstream` | Change the llama.cpp server URL | `--upstream http://127.0.0.1:8080` |
-| `--config` | Load a custom TOML config file | `--config /path/to/custom.toml` |
 | `--searxng-port` | Change the port for managed SearXNG | `--searxng-port 9999` |
+
+> Note: there is no `--api-key` flag and no enforced client key — the key comparison
+> (when a key *is* provided) uses `upstream.api_key`. See the Auth notes in `AGENTS.md`.
 
 ---
 
 ## Using the API
 
-Every request to the chat endpoint requires your API key. Choose one of two methods:
+The chat endpoint does **not** currently enforce a client key, but it is good
+practice to send one anyway (the API accepts either method below; any provided key
+is only compared on `/monitor/*` routes, against `upstream.api_key`):
 
 **Method 1: `X-API-Key` header (recommended)**
 ```bash
@@ -287,11 +293,13 @@ Edit `config/default.toml` or create your own TOML file. All settings have sensi
 [server]
 host = "0.0.0.0"        # Network interface to bind
 port = 8000              # Port A-PROX listens on
-api_key = "a-prox-s3cur3k3y"   # Client API key (used by --api-key flag)
+# NOTE: there is no server.api_key field. The sample value below is stale;
+# client-key comparison (when a key is provided) uses upstream.api_key.
 
 [upstream]
-base_url = "http://127.0.0.1:8080"  # Where llama.cpp is running
-api_key = "change-me"               # API key sent TO llama.cpp (set your own)
+base_url = "http://127.0.0.1:8080"  # Where llama.cpp runs (may be A-PROX-owned)
+api_key = "change-me"               # API key sent TO llama.cpp AND key compared
+#                                    # against when a client supplies a key
 model_alias = "qwen3.6-35b-moe"     # Display name for the model
 timeout_seconds = 180               # Max wait time for llama.cpp responses
 
@@ -302,9 +310,9 @@ rate_limit_per_minute = 120         # Requests per client per minute
 min_free_ram_gb = 16.0              # Reject bulk operations if RAM drops below this
 
 [context]
-max_context_tokens = 32768          # Max tokens in conversation (prunes older messages)
-reserve_completion_tokens = 4096    # Reserve tokens for the LLM's response
-sliding_window_turns = 10           # Keep this many recent turns verbatim
+max_context_tokens = 65536          # Max tokens in conversation (prunes older messages)
+reserve_completion_tokens = 8192    # Reserve tokens for the LLM's response
+sliding_window_turns = 7            # Keep this many recent turns verbatim
 
 [embeddings]
 model_path = "models/bge-small-en-v1.5-int8.onnx"  # Path to ONNX embedding model
@@ -334,8 +342,8 @@ pdf_upstream_model = "qwen3.6-35b-moe"  # Vision model for PDF processing
 ```
 
 **Key settings to customize:**
-- **`server.api_key`** — Change this to something secret; clients must send it with every request.
-- **`upstream.base_url`** — Must point to your running llama.cpp server.
+- **`upstream.api_key`** — Must match the key the llama.cpp server is launched with (and what image-gen's `[llama_server].api_key` uses). A-PROX sends it as `Authorization: Bearer` upstream.
+- **`upstream.base_url`** — Must point to the llama.cpp server (`http://127.0.0.1:8080` for the A-PROX-owned instance).
 - **`db.path`** — Where RAG documents are stored. Change if you want a different location.
 - **`search.searxng_url`** — Set to `http://127.0.0.1:8888` if you have SearXNG; leave as-is for mock fallback.
 
@@ -400,7 +408,62 @@ Prefix your message with `/rag`, `/knowledge`, or `/docs`:
 /docs Tell me about the architecture
 ```
 
-#### 3. Natural Language Triggers
+#### 3. Tool Command Flags
+
+Prefix your message with any of the per-tool `/flags` to **force the agentic
+loop** with that tool armed. Each flag is configurable under `[tool_commands]`
+and is disabled when set to `""`. Message text after the flag is passed to the
+model as the tool's request.
+
+| Flag | Tool armed | Behavior |
+|------|-----------|----------|
+| `/tools [names...]` | all internal tools | Generic agentic loop; add tool-name args (e.g. `/tools search fetch`) to arm an exact subset |
+| `/search` | `web_search` | Loop restricted to local web search |
+| `/fetch` | `web_fetch` | Loop restricted to page fetching/scraping |
+| `/ragsearch` | `rag_search` | Loop restricted to RAG store search |
+| `/ingest` | `rag_ingest` | Loop restricted to RAG store ingestion |
+| `/time` | `system_time` | Loop restricted to current time/date |
+| `/image` | `image_generate` | Loop restricted to image generation — t2i by default, **i2i automatically when a photo is attached** |
+| `/file` | `write_file` | Loop restricted to saving a text file (`/files/{name}`) |
+
+`/tools` accepts leading tool-name args to restrict the loop to exactly those
+tools (aliases like `search`, `fetch`, `rag`, `time`, `image`, `file` work; the
+remaining text becomes the request):
+
+```
+/tools search fetch what are the current GPU prices?
+/tools rag time compare notes on embeddings
+```
+
+```bash
+curl -X POST http://localhost:8000/v1/chat/completions \
+  -d '{"model": "qwen3.6-35b-moe",
+       "messages": [{"role": "user", "content": "/image a red circle on white"}]}'
+```
+
+Config example (each key is a string; empty string disables that flag):
+
+```toml
+[tool_commands]
+# Agentic-loop / flag commands
+agentic = "/tools"          # /tools search fetch ...  arms a subset by args
+web_search = "/search"
+web_fetch = "/fetch"
+rag_search = "/ragsearch"
+rag_ingest = "/ingest"
+system_time = "/time"
+image_generate = "/image"
+write_file = "/file"
+# Routing-only commands (empty string disables)
+bypass = "/bypass"          # → FastPassThrough
+direct = "/direct"          # → FastPassThrough
+pass = "/pass"              # → FastPassThrough
+rag = "/rag"                # → RAG search
+knowledge = "/knowledge"    # → RAG search
+docs = "/docs"              # → RAG search
+```
+
+#### 4. Natural Language Triggers
 The router detects intent from message content:
 
 | Intent | Trigger Phrases |
@@ -416,7 +479,7 @@ The router detects intent from message content:
 {"role": "user", "content": "Ingest into rag: The vector store uses sqlite-vec with cosine distance"}
 ```
 
-#### 4. Agentic Tool Loop
+#### 5. Agentic Tool Loop
 When routed to `AgenticToolLoop`, the LLM can autonomously decide to call:
 
 | Tool | Purpose |
@@ -693,6 +756,134 @@ Smaller chunks = more precise retrieval but more vectors. Larger chunks = fewer 
 
 ---
 
+## Image Generation
+
+A-PROX can generate images through its `image_generate` tool, backed by a managed
+ComfyUI (Qwen-Image 2.1 GGUF) backend. Full design/wiring details live in
+`imagegen_implementation_plan.md`; this section covers usage and config.
+
+### How it works
+
+1. **Detection** — A request counts as image-requested when the latest user turn
+   contains t2i verb phrases (`paint`, `draw a picture of`, `make a logo/image`, …)
+   or a t2i phrase **plus an attached image part** (→ image-to-image). It is routed
+   into the normal agentic tool loop with `image_generate` armed. The `/image`
+   flag does the same explicitly (`is_image_request` bypassed): t2i unless a photo
+   is attached, in which case the i2i pipeline (reference dims) runs.
+2. **Phase A (rewrite)** — llama.cpp (vision) rewrites the request into a
+   workflow-specific prompt per `prompts/t-iprompt.txt` / `prompts/i-iprompt.txt`,
+   extended with a `HARNESS_DIRECTIVE` (JSON schema for the tool call). If the model
+   emits bare JSON instead of a structured tool call, `try_parse_image_generate_json`
+   recovers it.
+3. **Phase B (generate)** — A-PROX ensures ComfyUI is up (port `8188`), SIGTERMs
+   llama.cpp (≤30s, SIGKILL fallback), uploads the reference image (i2i), injects
+   `workflows/t2i.json` / `i2i.json` (per-job random KSampler seed), submits and polls the job
+   (≤ `generation_timeout_s`), downloads the PNG via `/view`, saves it to the serve
+   dir, then **restarts llama.cpp** (≤120s health wait). The concurrency permit is
+   held for the whole job (chat requests queue during the llama downtime).
+4. **Phase C (return)** — A synthetic user message (text + base64 data-URL of the
+   PNG) is appended so llama.cpp (vision) can stream a caption. One
+   `delta.image_url` SSE event is emitted before the text (non-streaming: top-level
+   `image_url` on the response JSON). The PNG is also served at
+   `GET /images/{name}`.
+
+Resolution math (`src/imagegen/ratio.rs`): target 2 MP from `wh_ratio`, both sides
+rounded to a multiple of 16, capped at 4096; `ratio_follow="<image1>"` uses the
+reference image's own dimensions.
+
+### Wire contract for image results
+
+- **Streaming:** the choice delta carries `delta.image_url` (a data URL or served
+  URL) followed by normal text deltas. **Never send `delta.content` as a JSON
+  array** — CLAN casts it to String and throws.
+- **Tool result** (given to the model for captioning):
+  `{"status":"ok","image_url":...,"image_path":...,"prompt":...}`.
+- During a generation job llama.cpp is down, so `/health` and `/v1/models` may
+  error until it restarts; this is expected.
+
+### Config
+
+```toml
+[llama_server]            # llama.cpp that A-PROX owns (stopped during image jobs)
+enabled = true
+executable = "/home/…/llama.cpp/build/bin/llama-server"
+host = "127.0.0.1"
+port = 8080
+api_key = "…"             # must match upstream.api_key and [comfy_ui].api_key
+
+[comfy_ui]                # managed ComfyUI backend (paused models auto-unload ~0.4 GB)
+enabled = true
+host = "127.0.0.1"
+port = 8188
+workdir = "/path/to/ComfyUI"
+python = "/path/to/ComfyUI/.venv/bin/python"
+main_py = "main.py"
+api_key = "change-me"
+listen_timeout_secs = 30
+shutdown_timeout_secs = 10
+
+[image_generation]
+enabled = true
+workflows_dir = "workflows"
+prompts_dir = "prompts"
+serve_dir = "data/generated_images"
+public_base_url = ""            # if set, image_url points here instead of http://127.0.0.1:{port}
+poll_interval_ms = 1500
+generation_timeout_s = 180
+default_negative_prompt = "lowres, jpeg artifacts, bad anatomy, watermark, signature, extra fingers, cropped, worst quality"
+```
+
+An empty `public_base_url` makes served `image_url`s use
+`http://127.0.0.1:{server.port}`, which is what CLAN on the same machine or LAN
+needs. Point it at your public host for remote clients.
+
+---
+
+## File Generation (write_file)
+
+A-PROX can also have the model **write text files** (scripts, notes, markdown,
+CSV, …) and serve them to clients, using the same agentic-loop machinery as images
+but without any ComfyUI/llama-stop overhead.
+
+### How it works
+
+1. **Detection** — A request counts as a file-write when the latest user turn
+   matches `FILE_KEYWORDS` in `src/filegen/mod.rs` or a writing-verb plus a
+   file cue ("write a short python script to a file…"). It is routed into the
+   agentic loop with `write_file` armed.
+2. **Execution** — The model calls `write_file` with `filename` + `content`
+   (+ optional `mode`). A-PROX cleans the filename, rejects dangerous extensions
+   (`deny_exts`: `exe`, `sh`, `bat`, `html`, `php`, …), caps `content` at
+   `max_content_chars` (and tells the model to split via `mode="append"`), then
+   stores the file at `serve_dir` under `{id}_{cleaned-name}`.
+3. **Append** — Call the tool again with the **same filename** and
+   `mode="append"` to keep writing the same logical file across turns.
+4. **Return** — One `delta.file_url` SSE event `{"url","name","mime"}` is emitted
+   before the caption text (non-streaming: top-level `file_url`). The file is
+   served at `GET /files/{name}`.
+
+### Wire contract for file results
+
+- **Streaming:** `delta.file_url` `{"url","name","mime"}` as the first delta,
+  then normal text deltas (may appear alongside `delta.image_url`).
+- **Tool result** (given to the model): `{"status":"ok","file_url":...,"file_name":...,"size":...,"mime":...}`.
+- Successful `write_file` bodies are redacted from the history stored in the loop
+  context (`sanitize_tool_calls_for_history`), so long append-chains don't bloat
+  the context window.
+
+### Config
+
+```toml
+[file_generation]
+enabled = true
+serve_dir = "data/generated_files"
+public_base_url = ""            # if set, file_url points here instead of http://127.0.0.1:{port}
+max_content_chars = 24000       # per-call content cap; larger → model splits with mode=append
+deny_exts = ["exe", "sh", "bat", "com", "cmd", "dll", "so", "sys", "html", "htm", "php", "jar"]
+```
+
+---
+
 ## Using with LLM Frontends
 
 Point any OpenAI-compatible frontend (SillyTavern, OpenWebUI, etc.) to:
@@ -709,8 +900,8 @@ For remote access (e.g., from your phone), use your server's IP instead of `loca
 API Base URL: http://192.168.1.100:8000/v1
 ```
 
-Then start A-PROX with matching flags:
+Then start A-PROX:
 
 ```bash
-./target/release/a-prox --port 8000 --api-key my-mobile-key
+./target/release/a-prox --port 8000
 ```

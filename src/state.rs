@@ -1,12 +1,17 @@
 use std::sync::Arc;
 use reqwest::Client;
 use crate::config::AppConfig;
+use crate::comfy_ui::ComfyUIManager;
 use crate::context::{ContextManager, FastTokenizer};
 use crate::db::VectorStore;
 use crate::embeddings::CpuEmbedder;
+use crate::files::FileStore;
 use crate::guardrails::{ConcurrencyLimiter, SystemWatchdog};
+use crate::imagegen::ImageGenService;
+use crate::images::ImageStore;
 use crate::ingestion::watcher::DirectoryWatcher;
 use crate::ingestion::DirectoryIngestor;
+use crate::llama_server::LlamaServerManager;
 use crate::monitor::MonitorState;
 use crate::rag::RagEngine;
 use crate::search::SearchService;
@@ -25,6 +30,11 @@ pub struct AppState {
     pub concurrency_limiter: Arc<ConcurrencyLimiter>,
     pub watchdog: Arc<SystemWatchdog>,
     pub searxng_manager: Arc<SearXNGManager>,
+    pub llama_server_manager: Arc<LlamaServerManager>,
+    pub comfy_ui_manager: Arc<ComfyUIManager>,
+    pub image_store: Arc<ImageStore>,
+    pub image_service: Arc<ImageGenService>,
+    pub file_store: Arc<FileStore>,
     pub monitor: Arc<MonitorState>,
     pub directory_ingestor: Arc<DirectoryIngestor>,
     pub directory_watcher: Arc<DirectoryWatcher>,
@@ -91,6 +101,44 @@ impl AppState {
             searxng_manager.start(&config.searxng, &http_client).await?;
         }
 
+        let llama_server_manager = Arc::new(LlamaServerManager::new());
+        let comfy_ui_manager: Arc<ComfyUIManager> =
+            Arc::new(ComfyUIManager::new(config.comfy_ui.url.clone()));
+
+        // Boot both backends lazily: llama is needed for every model API request,
+        // ComfyUI only when an image job arrives. Failures are tolerated at boot —
+        // the managers retry/spawn on demand (see routes.rs + imagegen service).
+        if config.llama_server.enabled {
+            match llama_server_manager
+                .start(&config.llama_server, &http_client)
+                .await
+            {
+                Ok(_) => {
+                    let base = format!(
+                        "http://{}:{}",
+                        config.llama_server.host, config.llama_server.port
+                    );
+                    tracing::info!("Managed llama.cpp serving at {base}");
+                }
+                Err(e) => tracing::warn!(
+                    "managed llama.cpp failed to start (will retry on demand): {e}"
+                ),
+            }
+        }
+
+        let image_store = Arc::new(ImageStore::new(&config.image_generation.serve_dir)?);
+        let file_store = Arc::new(FileStore::new(&config.file_generation.serve_dir)?);
+        let image_service = Arc::new(ImageGenService::new(
+            Arc::clone(&llama_server_manager),
+            Arc::clone(&comfy_ui_manager),
+            Arc::clone(&image_store),
+            http_client.clone(),
+            config.llama_server.clone(),
+            config.comfy_ui.clone(),
+            config.image_generation.clone(),
+            config.server.port,
+        ));
+
         let monitor = Arc::new(MonitorState::new(
             config.monitor.max_history_entries,
         ));
@@ -143,6 +191,11 @@ impl AppState {
             concurrency_limiter,
             watchdog,
             searxng_manager,
+            llama_server_manager,
+            comfy_ui_manager,
+            image_store,
+            image_service,
+            file_store,
             monitor,
             directory_ingestor,
             directory_watcher,
