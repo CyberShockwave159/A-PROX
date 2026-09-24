@@ -783,11 +783,14 @@ ComfyUI (Qwen-Image 2.1 GGUF) backend. Full design/wiring details live in
    VRAM) and **restarts llama.cpp** (≤ `health_timeout_s`, default 600s — long
    enough for cold boots). The concurrency permit is
    held for the whole job (chat requests queue during the llama downtime).
-4. **Phase C (return)** — A synthetic user message (text + base64 data-URL of the
-   PNG) is appended so llama.cpp (vision) can stream a caption. One
-   `delta.image_url` SSE event is emitted before the text (non-streaming: top-level
-   `image_url` on the response JSON). The PNG is also served at
-   `GET /images/{name}`.
+4. **Phase C (return)** — A synthetic user message (text + the generated image
+   served from A-PROX's *own loopback* `/images/{name}` endpoint, passed as an
+   `image_url` part) is appended so llama.cpp (vision) can stream a caption —
+   the multi-MB PNG bytes never enter the LLM context (only llama's bounded
+   vision tokens do). One `delta.image_url` SSE event is emitted before the text
+   (non-streaming: top-level `image_url` on the response JSON); that client-facing
+   payload is a base64 data-URL when `inline_data_url` is enabled, otherwise the
+   served `http(s)://…/images/…` URL. The PNG is also served at `GET /images/{name}`.
 
 Only llama.cpp is started eagerly at A-PROX boot (see `state.rs`); ComfyUI is
 booted on demand per image job and never stays up between requests.
@@ -804,7 +807,8 @@ reference image's own dimensions.
 - **Streaming:** the choice delta carries `delta.image_url` (a data URL or served
   URL) followed by normal text deltas. **Never send `delta.content` as a JSON
   array** — CLAN casts it to String and throws.
-- **Tool result** (given to the model for captioning):
+- **Tool result** (given to the model; always a small served URL, never base64 —
+  the base64 we generate is client-only):
   `{"status":"ok","image_url":...,"image_path":...,"prompt":...}`.
 - During a generation job llama.cpp is down, so `/health` and `/v1/models` may
   error until it restarts; this is expected.
@@ -848,17 +852,33 @@ generation_timeout_s = 180
 default_negative_prompt = "bad anatomy, bad composition, bad lighting, distorted face, extra limbs, low quality, out of focus, overexposed, plastic, poor symmetry, signature, watermark, ugly, censored"
 ```
 
-Artifact URL resolution order (used for both `image_url` and `file_url`):
-1. `inline_data_url: true` → the URL is a base64 `data:` URI (works anywhere the
-   client can decode the payload, even when `/images`/`/files` isn't routable; the
-   client must decode with `Image.memory`, not `Image.network`);
-2. config `public_base_url` (explicit override; point it at your public host for
-   remote clients);
-3. `X-Forwarded-Proto` + `X-Forwarded-Host` (when A-PROX sits behind a TLS reverse
-   proxy);
-4. the request `Host` header — the address the client actually dialed (loopback,
-   LAN IP, public IP, or proxy domain);
-5. fallback `http://127.0.0.1:{server.port}` for direct loopback use.
+There are two independent URL representations — the LLM always sees the small
+served URL; the client sees either that served URL or an inline data-URL:
+
+- **Client-facing** `image_url`/`file_url` (SSE `delta.image_url` /
+  `delta.file_url`, non-streaming outer JSON): resolved in this order —
+  1. `inline_data_url: true` → a base64 `data:` URI (works anywhere the client
+     can decode the payload, even when `/images`/`/files` isn't routable; the
+     client must decode with `Image.memory`, not `Image.network`);
+  2. config `public_base_url` (explicit override; point it at your public host
+     for remote clients);
+  3. `X-Forwarded-Proto` + `X-Forwarded-Host` (when A-PROX sits behind a TLS
+     reverse proxy);
+  4. the request `Host` header — the address the client actually dialed
+     (loopback, LAN IP, public IP, or proxy domain);
+  5. fallback `http://127.0.0.1:{server.port}` for direct loopback use.
+- **LLM-facing** (tool results + the Phase C captioning message): ALWAYS the
+  small served URL, never base64 — so the generated PNG's multi-MB bytes never
+  enter the KV cache. The caption image is served to llama.cpp from A-PROX's own
+  loopback `/images/{name}` endpoint.
+
+> **Operational note on `inline_data_url`:** base64 data-URLs demand client-side
+> byte decoding (`Image.memory`), and the CLAN Flutter clients (Android APK, Linux
+> desktop, PWA) render served-URL images far more reliably — the inline path has
+> proven flaky on Android in particular. Keep `inline_data_url = false` (default)
+> and rely on `public_base_url` / the request `Host` header instead; the client
+> is expected to always display the artifact URL alongside the inline image so a
+> tap-through link remains available even if the render or download fails.
 
 ---
 

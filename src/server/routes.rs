@@ -23,7 +23,7 @@ use crate::comfy_ui::WorkflowKind;
 use crate::error::AppError;
 use crate::guardrails::InferencePermitGuard;
 use crate::imagegen::{
-    detect_image_request, extract_reference_image, load_prompt_file, to_data_url,
+    detect_image_request, extract_reference_image, load_prompt_file,
     try_parse_image_generate_json, GenerateRequest, GeneratedImage, HARNESS_DIRECTIVE,
 };
 use crate::filegen::{
@@ -1105,27 +1105,31 @@ fn next_file_id() -> String {
     )
 }
 
-/// Resolve the emitted `file_url` for a written file: a base64 data-URL of the
-/// full stored bytes when `[file_generation].inline_data_url` is enabled,
-/// otherwise a served `{base}/files/{name}` URL. `base` is the request-derived
-/// base already stored on the context (config `public_base_url` → forwarded
-/// headers → `Host` → loopback fallback).
+/// Resolve the URLs for a written file, returned as `(served_url, client_data_url)`:
+/// - `served_url` is the `{base}/files/{name}` URL (request-derived base: config
+///   `public_base_url` → forwarded headers → `Host` → loopback). It is used in
+///   the LLM-facing tool result so the KV cache only ever sees a small URL.
+/// - `client_data_url` is a base64 data-URL of the full stored bytes, but only
+///   when `[file_generation].inline_data_url` is enabled; it is emitted to the
+///   client, never sent to the LLM.
 fn resolve_file_public_url(
     state: &Arc<AppState>,
     fctx: &FileGenContext,
     servable_name: &str,
     fallback_bytes: &[u8],
     mime: &str,
-) -> String {
-    if state.config.file_generation.inline_data_url {
+) -> (String, Option<String>) {
+    let served = file_served_url(&fctx.public_base, state.config.server.port, servable_name);
+    let data = if state.config.file_generation.inline_data_url {
         let bytes = state
             .file_store
             .read(servable_name)
             .unwrap_or_else(|| fallback_bytes.to_vec());
-        file_data_url(&bytes, mime)
+        Some(file_data_url(&bytes, mime))
     } else {
-        file_served_url(&fctx.public_base, state.config.server.port, servable_name)
-    }
+        None
+    };
+    (served, data)
 }
 
 /// Base64 data-URL form of a generated file (`data:<mime>;base64,…`).
@@ -1145,6 +1149,18 @@ fn file_served_url(base: &str, server_port: u16, servable_name: &str) -> String 
         base.trim_end_matches('/').to_string()
     };
     format!("{base}/files/{servable_name}")
+}
+
+/// URL string emitted to the client for a generated image: the inline base64
+/// data-URL when `inline_data_url` is enabled, else the served URL.
+fn image_client_url(img: &GeneratedImage) -> String {
+    img.data_url.clone().unwrap_or_else(|| img.public_url.clone())
+}
+
+/// URL string emitted to the client for a generated file: the inline base64
+/// data-URL when `inline_data_url` is enabled, else the served URL.
+fn file_client_url(f: &GeneratedFile) -> String {
+    f.data_url.clone().unwrap_or_else(|| f.public_url.clone())
 }
 
 /// Intercept `write_file` tool calls in the agentic loop. Returns `None` when
@@ -1238,10 +1254,12 @@ async fn maybe_execute_write_file(
         }
     };
 
-    // Always resolve the emit-URL for the artifact regardless of which table
-    // (append or fresh) stored it, from the request-derived base.
+    // Always resolve the emit-URLs for the artifact regardless of which table
+    // (append or fresh) stored it: a served URL for LLM context, plus (in inline
+    // mode) a client-only base64 data-URL.
     let mime = file_content_type_for(&servable_name);
-    let public_url = resolve_file_public_url(state, fctx, &servable_name, content.as_bytes(), &mime);
+    let (public_url, data_url) =
+        resolve_file_public_url(state, fctx, &servable_name, content.as_bytes(), &mime);
     let size = state
         .file_store
         .size(&servable_name)
@@ -1251,6 +1269,7 @@ async fn maybe_execute_write_file(
         name: clean,
         servable_name,
         public_url,
+        data_url,
         file_path: path,
         mime,
         size,
@@ -1316,13 +1335,22 @@ fn sanitize_tool_calls_for_history(tool_calls: Option<&Value>, outputs: &[String
     v
 }
 
-/// Push the synthetic vision user message (text + base64 data URL of the
-/// generated image) so llama.cpp can caption it during the final synthesis turn.
-fn inject_generated_image_as_user_msg(messages: &mut Vec<ChatMessage>, img: &GeneratedImage) {
-    let data_url = to_data_url(&img.png_bytes);
+/// Push the synthetic vision user message (text + the generated image as an
+/// `image_url` part pointing at A-PROX's own loopback serve endpoint) so
+/// llama.cpp can caption it during the final synthesis turn. llama.cpp fetches
+/// `http://127.0.0.1:{port}/images/{id}.png` as a real image (bounded vision
+/// tokens via mmproj), so the multi-MB PNG never enters the KV cache as base64
+/// text. This is independent of `inline_data_url`, which only affects what is
+/// emitted to the client.
+fn inject_generated_image_as_user_msg(
+    messages: &mut Vec<ChatMessage>,
+    img: &GeneratedImage,
+    server_port: u16,
+) {
+    let caption_url = format!("http://127.0.0.1:{server_port}/images/{}.png", img.id);
     let parts = json!([
         { "type": "text", "text": "The image you were asked to generate is above. Keep your reply to the user concise: confirm the image was created, describe what it shows, and mention the image URL if helpful." },
-        { "type": "image_url", "image_url": { "url": data_url } }
+        { "type": "image_url", "image_url": { "url": caption_url } }
     ]);
     messages.push(ChatMessage {
         role: "user".to_string(),
@@ -1636,7 +1664,7 @@ async fn execute_agentic_loop(
                 let generated = image_ctx.as_ref().and_then(|c| c.result.as_ref());
                 if let Some(img) = generated {
                     if !vision_injected {
-                        inject_generated_image_as_user_msg(&mut messages, img);
+                        inject_generated_image_as_user_msg(&mut messages, img, state.config.server.port);
                         vision_injected = true;
                     }
                 }
@@ -1735,11 +1763,11 @@ async fn execute_agentic_loop(
                 let mut final_data = data;
                 let generated = image_ctx.as_ref().and_then(|c| c.result.as_ref());
                 if let Some(img) = generated {
-                    final_data["image_url"] = json!({ "url": img.public_url });
+                    final_data["image_url"] = json!({ "url": image_client_url(img) });
                 }
                 if let Some(f) = file_ctx.as_ref().and_then(|c| c.result.as_ref()) {
                     final_data["file_url"] = json!({
-                        "url": f.public_url,
+                        "url": file_client_url(f),
                         "name": f.name,
                         "mime": f.mime,
                         "size": f.size,
@@ -2031,12 +2059,12 @@ async fn execute_agentic_loop(
                 // can caption it during synthesis streaming.
                 let generated = image_ctx.as_ref().and_then(|c| c.result.as_ref());
                 if let Some(img) = generated {
-                    inject_generated_image_as_user_msg(&mut messages, img);
+                    inject_generated_image_as_user_msg(&mut messages, img, stream_state.config.server.port);
                 }
                 let pending_image_url = image_ctx
                     .as_ref()
                     .and_then(|c| c.result.as_ref())
-                    .map(|i| i.public_url.clone());
+                    .map(|i| image_client_url(i));
                 let pending_file = file_ctx
                     .as_ref()
                     .and_then(|c| c.result.as_ref())
@@ -2165,7 +2193,8 @@ async fn execute_agentic_loop(
                                             .await;
                                     }
                                     if let Some(f) = &pending_file {
-                                        let event = file_url_sse_payload(&f.public_url, &f.name, f.mime);
+                                        let f_url = file_client_url(f);
+                                        let event = file_url_sse_payload(&f_url, &f.name, f.mime);
                                         let _ = tx_for_task
                                             .send(bytes::Bytes::from(format!("data: {event}\n\n")))
                                             .await;
@@ -2197,7 +2226,8 @@ async fn execute_agentic_loop(
                             .await;
                     }
                     if let Some(f) = &pending_file {
-                        let event = file_url_sse_payload(&f.public_url, &f.name, f.mime);
+                        let f_url = file_client_url(f);
+                        let event = file_url_sse_payload(&f_url, &f.name, f.mime);
                         let _ = tx_for_task
                             .send(bytes::Bytes::from(format!("data: {event}\n\n")))
                             .await;
@@ -2214,7 +2244,8 @@ async fn execute_agentic_loop(
                             .await;
                     }
                     if let Some(f) = &pending_file {
-                        let event = file_url_sse_payload(&f.public_url, &f.name, f.mime);
+                        let f_url = file_client_url(f);
+                        let event = file_url_sse_payload(&f_url, &f.name, f.mime);
                         let _ = tx_for_task
                             .send(bytes::Bytes::from(format!("data: {event}\n\n")))
                             .await;

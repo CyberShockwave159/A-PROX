@@ -31,7 +31,14 @@ fn random_seed() -> u64 {
 /// A successfully generated image, persisted and publicly addressable.
 pub struct GeneratedImage {
     pub id: String,
+    /// Publicly-addressable served URL (`{base}/images/{id}.png`). This is the
+    /// URL used in LLM-facing contexts (tool results, captioning) — always a
+    /// small URL, never a base64 blob, so the KV cache stays bounded.
     pub public_url: String,
+    /// Base64 data-URL of the PNG, present only when
+    /// `[image_generation].inline_data_url` is enabled. Emitted to the CLIENT
+    /// in the `image_url` payload only; never placed in LLM context.
+    pub data_url: Option<String>,
     pub file_path: std::path::PathBuf,
     pub png_bytes: Vec<u8>,
     pub kind: WorkflowKind,
@@ -204,25 +211,27 @@ impl ImageGenService {
             let file_path = self.store.save_png(&id, &bytes)?;
             tracing::info!("Image saved to {}", file_path.display());
 
-            // The publicly addressable URL for the generated PNG: inline base64
-            // data-URL when `inline_data_url` is enabled, otherwise a served URL
-            // built from the per-request base (config override → forwarded
-            // headers → request Host), falling back to the service's configured
-            // base (itself `public_base_url` → loopback).
-            let public_url = if self.img_cfg.inline_data_url {
-                to_data_url(&bytes)
+            // Publicly-addressable served URL for the generated PNG, built from
+            // the per-request base (config override → forwarded headers →
+            // request Host), falling back to the service's configured base
+            // (itself `public_base_url` → loopback). This served URL is what
+            // the LLM sees in tool results / captioning — a small URL, never
+            // the multi-MB base64. `data_url` holds the optional inline
+            // base64 data-URL that is emitted to the CLIENT only (SSE
+            // `delta.image_url` / non-streaming `image_url` field); it never
+            // enters the LLM context, keeping the KV cache free of base64.
+            let base = req.public_base.trim();
+            let base = if base.is_empty() {
+                self.public_base.as_str()
             } else {
-                let base = req.public_base.trim();
-                let base = if base.is_empty() {
-                    self.public_base.as_str()
-                } else {
-                    base.trim_end_matches('/')
-                };
-                image_served_url(base, &id)
+                base.trim_end_matches('/')
             };
+            let public_url = image_served_url(base, &id);
+            let data_url = self.img_cfg.inline_data_url.then(|| to_data_url(&bytes));
 
             Ok(GeneratedImage {
                 public_url,
+                data_url,
                 id,
                 file_path,
                 png_bytes: bytes,
