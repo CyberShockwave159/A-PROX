@@ -9,6 +9,7 @@ use crate::config::{ComfyUiConfig, ImageGenerationConfig, LlamaServerConfig};
 use crate::images::ImageStore;
 use crate::llama_server::LlamaServerManager;
 use crate::imagegen::ratio::compute_dimensions;
+use crate::imagegen::to_data_url;
 
 static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -46,13 +47,19 @@ pub struct GenerateRequest {
     pub reference_dims: Option<(u32, u32)>,
     /// The attached image bytes (uploaded to ComfyUI for i2i), if any.
     pub reference_image: Option<Vec<u8>>,
+    /// Externally-addressable base URL for the served PNG, resolved per request
+    /// (config `public_base_url` → forwarded headers → `Host` → loopback). Empty
+    /// → fall back to the service's configured base.
+    pub public_base: String,
 }
 
 /// Owns llama.cpp lifecycle + ComfyUI orchestration for image jobs.
 ///
 /// The `generate` flow intentionally holds the caller's concurrency permit for
-/// its whole duration (llama.cpp stop → ComfyUI job → llama.cpp restart), so at
-/// most one image job runs at a time, mirroring the guardrails semaphore.
+/// its whole duration (llama.cpp stop → ComfyUI boot → job → ComfyUI stop →
+/// llama.cpp restart), so at most one image job runs at a time, mirroring the
+/// guardrails semaphore. ComfyUI is booted and stopped per job (never left up),
+/// so its VRAM is released back to llama.cpp between image requests.
 pub struct ImageGenService {
     llama: Arc<LlamaServerManager>,
     comfy: Arc<ComfyUIManager>,
@@ -97,11 +104,22 @@ impl ImageGenService {
             anyhow::bail!("image generation is disabled ([image_generation] enabled = false)");
         }
 
-        // Ensure ComfyUI is reachable before we stop llama (which frees VRAM).
-        self.comfy.ensure_running(&self.comfy_cfg, &self.http_client).await?;
-
+        // Stop llama.cpp first so its VRAM is free before ComfyUI loads into
+        // the GPU (ComfyUI is not started at boot and is stopped after every
+        // job, so nothing is holding VRAM here).
         tracing::info!("Image job: stopping llama.cpp to free VRAM for ComfyUI...");
         self.llama.stop();
+
+        // Bring ComfyUI up for this job only.
+        if let Err(e) = self.comfy.ensure_running(&self.comfy_cfg, &self.http_client).await {
+            tracing::error!("image job failed to start ComfyUI: {e}");
+            // llama.cpp is already down — bring it back before surfacing the error.
+            let restart = self.llama.start(&self.llama_cfg, &self.http_client).await;
+            if let Err(re) = &restart {
+                tracing::error!("failed to restart llama.cpp after ComfyUI start failure: {re}");
+            }
+            return Err(e);
+        }
 
         let start = Instant::now();
         let outcome: anyhow::Result<GeneratedImage> = async {
@@ -186,8 +204,25 @@ impl ImageGenService {
             let file_path = self.store.save_png(&id, &bytes)?;
             tracing::info!("Image saved to {}", file_path.display());
 
+            // The publicly addressable URL for the generated PNG: inline base64
+            // data-URL when `inline_data_url` is enabled, otherwise a served URL
+            // built from the per-request base (config override → forwarded
+            // headers → request Host), falling back to the service's configured
+            // base (itself `public_base_url` → loopback).
+            let public_url = if self.img_cfg.inline_data_url {
+                to_data_url(&bytes)
+            } else {
+                let base = req.public_base.trim();
+                let base = if base.is_empty() {
+                    self.public_base.as_str()
+                } else {
+                    base.trim_end_matches('/')
+                };
+                image_served_url(base, &id)
+            };
+
             Ok(GeneratedImage {
-                public_url: format!("{}/images/{}.png", self.public_base, id),
+                public_url,
                 id,
                 file_path,
                 png_bytes: bytes,
@@ -195,6 +230,10 @@ impl ImageGenService {
             })
         }
         .await;
+
+        // Fully stop ComfyUI so it releases its VRAM back to llama.cpp.
+        self.comfy.stop();
+        tracing::info!("ComfyUI stopped after image job; VRAM released.");
 
         // Always bring llama.cpp back, regardless of job outcome.
         let restart_attempt = self.llama.start(&self.llama_cfg, &self.http_client).await;
@@ -209,6 +248,11 @@ impl ImageGenService {
 
         outcome
     }
+}
+
+/// Served-URL form of a generated image, rooted at a resolved public base.
+pub fn image_served_url(base: &str, id: &str) -> String {
+    format!("{}/images/{}.png", base.trim_end_matches('/'), id)
 }
 
 struct OutputImage {

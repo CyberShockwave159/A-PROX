@@ -106,6 +106,12 @@ fn to_data_url_roundtrips_format() {
 }
 
 #[test]
+fn image_served_url_joins_base_and_id() {
+    assert_eq!(image_served_url("http://host:8000", "gen_1"), "http://host:8000/images/gen_1.png");
+    assert_eq!(image_served_url("https://example.com/", "gen_2"), "https://example.com/images/gen_2.png");
+}
+
+#[test]
 fn compute_dims_are_stable() {
     for (r, ref_dims) in [
         (None, None),

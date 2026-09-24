@@ -280,6 +280,20 @@ pub async fn chat_completions(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
+    // Resolve the externally-addressable base URLs for generated images/files
+    // once per request, from the address the client actually dialed through
+    // (config `public_base_url` → forwarded headers → `Host` → loopback).
+    let image_base = artifact_base_url(
+        &state.config.image_generation.public_base_url,
+        &headers,
+        state.config.server.port,
+    );
+    let file_base = artifact_base_url(
+        &state.config.file_generation.public_base_url,
+        &headers,
+        state.config.server.port,
+    );
+
     // Normalize route decision string for consistent statistics grouping
     let route_label = match &decision {
         RouteDecision::FastPassThrough => "FastPassThrough".to_string(),
@@ -384,10 +398,10 @@ pub async fn chat_completions(
                 .map_err(|e| AppError::Context(e.to_string()))?;
 
             // Detect image-generation requests and arm the image pipeline context.
-            let image_gen_ctx = prepare_image_request(&state, &mut pruned_messages);
+            let image_gen_ctx = prepare_image_request(&state, &mut pruned_messages, &image_base);
 
             // Detect file-write requests and arm the write_file pipeline context.
-            let file_gen_ctx = prepare_file_request(&state, &mut pruned_messages);
+            let file_gen_ctx = prepare_file_request(&state, &mut pruned_messages, &file_base);
 
             // Ensure internal tool schemas are registered if not provided
             if payload.get("tools").is_none() {
@@ -409,10 +423,10 @@ pub async fn chat_completions(
             let mut image_gen_ctx = None;
             let mut file_gen_ctx = None;
             if tools.iter().any(|t| t == "image_generate") {
-                image_gen_ctx = prepare_forced_image_request(&state, &mut pruned_messages);
+                image_gen_ctx = prepare_forced_image_request(&state, &mut pruned_messages, &image_base);
             }
             if tools.iter().any(|t| t == "write_file") {
-                file_gen_ctx = prepare_forced_file_request(&state, &mut pruned_messages);
+                file_gen_ctx = prepare_forced_file_request(&state, &mut pruned_messages, &file_base);
             }
 
             if payload.get("tools").is_none() {
@@ -684,6 +698,9 @@ struct ImageGenContext {
     failed: bool,
     /// The rewritten prompt used for the generation (surface in the tool result).
     last_prompt: String,
+    /// Externally-addressable base URL for the served image (config override →
+    /// forwarded headers → request `Host` → loopback fallback).
+    public_base: String,
 }
 
 /// State carried through the agentic loop for a file-write request. Populated by
@@ -693,6 +710,52 @@ struct FileGenContext {
     active: Option<GeneratedFile>,
     result: Option<GeneratedFile>,
     failed: bool,
+    /// Externally-addressable base URL for the served file (config override →
+    /// forwarded headers → request `Host` → loopback fallback).
+    public_base: String,
+}
+
+/// Resolve the externally-addressable base URL for generated artifacts, using
+/// the request the client actually dialed through. Priority:
+///   1. non-empty `cfg_override` (`[image_generation]`/`[file_generation]`
+///      `public_base_url`) — explicit config always wins;
+///   2. `X-Forwarded-Proto` (first of a comma-list, default `http`) +
+///      `X-Forwarded-Host` (first value) — TLS reverse proxies;
+///   3. the request `Host` header (LAN IP, public IP, or proxy domain);
+///   4. loopback fallback `http://127.0.0.1:{server_port}` for direct local use.
+fn artifact_base_url(cfg_override: &str, headers: &HeaderMap, server_port: u16) -> String {
+    let trimmed = cfg_override.trim();
+    if !trimmed.is_empty() {
+        return trimmed.trim_end_matches('/').to_string();
+    }
+
+    let proto = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "http".to_string());
+
+    let host = headers
+        .get("x-forwarded-host")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            headers
+                .get("host")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        });
+
+    match host {
+        // Reject values with whitespace; they are never a valid host.
+        Some(h) if !h.chars().any(char::is_whitespace) => format!("{proto}://{h}"),
+        _ => format!("http://127.0.0.1:{server_port}"),
+    }
 }
 
 /// Detect an image request in the latest user turn and prepare the pipeline:
@@ -703,6 +766,7 @@ struct FileGenContext {
 fn prepare_image_request(
     state: &Arc<AppState>,
     messages: &mut Vec<ChatMessage>,
+    public_base: &str,
 ) -> Option<ImageGenContext> {
     if !state.config.image_generation.enabled {
         return None;
@@ -733,6 +797,7 @@ fn prepare_image_request(
         result: None,
         failed: false,
         last_prompt: String::new(),
+        public_base: public_base.to_string(),
     })
 }
 
@@ -741,6 +806,7 @@ fn prepare_image_request(
 fn prepare_file_request(
     state: &Arc<AppState>,
     messages: &mut Vec<ChatMessage>,
+    public_base: &str,
 ) -> Option<FileGenContext> {
     if !state.config.file_generation.enabled {
         return None;
@@ -754,6 +820,7 @@ fn prepare_file_request(
         active: None,
         result: None,
         failed: false,
+        public_base: public_base.to_string(),
     })
 }
 
@@ -763,6 +830,7 @@ fn prepare_file_request(
 fn prepare_forced_image_request(
     state: &Arc<AppState>,
     messages: &mut Vec<ChatMessage>,
+    public_base: &str,
 ) -> Option<ImageGenContext> {
     if !state.config.image_generation.enabled {
         return None;
@@ -786,6 +854,7 @@ fn prepare_forced_image_request(
         result: None,
         failed: false,
         last_prompt: String::new(),
+        public_base: public_base.to_string(),
     })
 }
 
@@ -793,6 +862,7 @@ fn prepare_forced_image_request(
 fn prepare_forced_file_request(
     state: &Arc<AppState>,
     messages: &mut Vec<ChatMessage>,
+    public_base: &str,
 ) -> Option<FileGenContext> {
     if !state.config.file_generation.enabled {
         return None;
@@ -803,6 +873,7 @@ fn prepare_forced_file_request(
         active: None,
         result: None,
         failed: false,
+        public_base: public_base.to_string(),
     })
 }
 
@@ -980,6 +1051,7 @@ async fn maybe_execute_image_generate(
         } else {
             None
         },
+        public_base: image_ctx.public_base.clone(),
     };
 
     match state.image_service.generate(request).await {
@@ -1031,6 +1103,48 @@ fn next_file_id() -> String {
             .unwrap_or(0),
         FILE_COUNTER.fetch_add(1, Ordering::SeqCst)
     )
+}
+
+/// Resolve the emitted `file_url` for a written file: a base64 data-URL of the
+/// full stored bytes when `[file_generation].inline_data_url` is enabled,
+/// otherwise a served `{base}/files/{name}` URL. `base` is the request-derived
+/// base already stored on the context (config `public_base_url` → forwarded
+/// headers → `Host` → loopback fallback).
+fn resolve_file_public_url(
+    state: &Arc<AppState>,
+    fctx: &FileGenContext,
+    servable_name: &str,
+    fallback_bytes: &[u8],
+    mime: &str,
+) -> String {
+    if state.config.file_generation.inline_data_url {
+        let bytes = state
+            .file_store
+            .read(servable_name)
+            .unwrap_or_else(|| fallback_bytes.to_vec());
+        file_data_url(&bytes, mime)
+    } else {
+        file_served_url(&fctx.public_base, state.config.server.port, servable_name)
+    }
+}
+
+/// Base64 data-URL form of a generated file (`data:<mime>;base64,…`).
+fn file_data_url(bytes: &[u8], mime: &str) -> String {
+    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine;
+    format!("data:{mime};base64,{}", B64.encode(bytes))
+}
+
+/// Served-URL form of a generated file, rooted at the resolved public base
+/// (empty base → loopback fallback `http://127.0.0.1:{server_port}`).
+fn file_served_url(base: &str, server_port: u16, servable_name: &str) -> String {
+    let base = base.trim();
+    let base = if base.is_empty() {
+        format!("http://127.0.0.1:{server_port}")
+    } else {
+        base.trim_end_matches('/').to_string()
+    };
+    format!("{base}/files/{servable_name}")
 }
 
 /// Intercept `write_file` tool calls in the agentic loop. Returns `None` when
@@ -1124,20 +1238,14 @@ async fn maybe_execute_write_file(
         }
     };
 
-    let base_url = {
-        let cfg = &state.config.file_generation;
-        if !cfg.public_base_url.trim().is_empty() {
-            cfg.public_base_url.trim_end_matches('/').to_string()
-        } else {
-            format!("http://127.0.0.1:{}", state.config.server.port)
-        }
-    };
+    // Always resolve the emit-URL for the artifact regardless of which table
+    // (append or fresh) stored it, from the request-derived base.
+    let mime = file_content_type_for(&servable_name);
+    let public_url = resolve_file_public_url(state, fctx, &servable_name, content.as_bytes(), &mime);
     let size = state
         .file_store
         .size(&servable_name)
         .unwrap_or(content.len() as u64);
-    let public_url = format!("{base_url}/files/{servable_name}");
-    let mime = file_content_type_for(&servable_name);
     let file = GeneratedFile {
         id,
         name: clean,
@@ -2350,5 +2458,101 @@ mod filegen_tests {
     fn sanitize_none_is_empty_array() {
         let out = sanitize_tool_calls_for_history(None, &[]);
         assert_eq!(out, json!([]));
+    }
+}
+
+#[cfg(test)]
+mod base_url_tests {
+    use super::*;
+    use axum::http::{HeaderMap, HeaderName, HeaderValue};
+
+    fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(
+                k.parse::<HeaderName>().unwrap(),
+                HeaderValue::from_str(v).unwrap(),
+            );
+        }
+        h
+    }
+
+    #[test]
+    fn forwarded_proto_and_host_used_when_present() {
+        let h = headers(&[
+            ("x-forwarded-proto", "https"),
+            ("x-forwarded-host", "chat.example.com"),
+            ("host", "127.0.0.1:8000"),
+        ]);
+        assert_eq!(artifact_base_url("", &h, 8000), "https://chat.example.com");
+    }
+
+    #[test]
+    fn forwarded_host_wins_over_plain_host() {
+        let h = headers(&[("x-forwarded-host", "proxy.local"), ("host", "127.0.0.1:8000")]);
+        assert_eq!(artifact_base_url("", &h, 8000), "http://proxy.local");
+    }
+
+    #[test]
+    fn multi_value_forwarded_headers_take_first() {
+        let h = headers(&[
+            ("x-forwarded-proto", "https, http"),
+            ("x-forwarded-host", "a.example.com, b.example.com"),
+        ]);
+        assert_eq!(artifact_base_url("", &h, 8000), "https://a.example.com");
+    }
+
+    #[test]
+    fn plain_host_header_used_when_no_forwarded_headers() {
+        let h = headers(&[("host", "192.168.1.5:8000")]);
+        assert_eq!(artifact_base_url("", &h, 8000), "http://192.168.1.5:8000");
+    }
+
+    #[test]
+    fn missing_headers_fall_back_to_loopback() {
+        assert_eq!(artifact_base_url("", &HeaderMap::new(), 7777), "http://127.0.0.1:7777");
+    }
+
+    #[test]
+    fn whitespace_host_is_rejected() {
+        let h = headers(&[("host", "bad host with spaces")]);
+        assert_eq!(artifact_base_url("", &h, 8000), "http://127.0.0.1:8000");
+    }
+
+    #[test]
+    fn config_override_wins_over_headers() {
+        let h = headers(&[
+            ("x-forwarded-proto", "https"),
+            ("x-forwarded-host", "chat.example.com"),
+        ]);
+        assert_eq!(
+            artifact_base_url("https://cdn.example.com/base/", &h, 8000),
+            "https://cdn.example.com/base"
+        );
+    }
+
+    #[test]
+    fn default_proto_is_http() {
+        let h = headers(&[("x-forwarded-host", "a.example.com")]);
+        assert_eq!(artifact_base_url("", &h, 8000), "http://a.example.com");
+    }
+
+    #[test]
+    fn file_served_url_uses_base_and_trims_slash() {
+        assert_eq!(file_served_url("http://host:8000/", 8000, "f_1_a.txt"), "http://host:8000/files/f_1_a.txt");
+        assert_eq!(file_served_url("http://host:8000", 8000, "f_1_a.txt"), "http://host:8000/files/f_1_a.txt");
+    }
+
+    #[test]
+    fn file_served_url_empty_base_falls_back_to_loopback() {
+        assert_eq!(file_served_url("", 8000, "f_1_a.txt"), "http://127.0.0.1:8000/files/f_1_a.txt");
+    }
+
+    #[test]
+    fn file_data_url_emits_data_prefix() {
+        let url = file_data_url(b"hello world", "text/plain");
+        assert!(url.starts_with("data:text/plain;base64,"));
+        // base64("hello world") == "aGVsbG8gd29ybGQ="
+        assert_eq!(url, "data:text/plain;base64,aGVsbG8gd29ybGQ=");
     }
 }

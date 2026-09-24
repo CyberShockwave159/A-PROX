@@ -16,13 +16,13 @@ Your Apps (SillyTavern, OpenWebUI, CLAN, curl, etc.)
       │ 8080      │ 8188 (managed, image jobs)
       ▼           ▼
  ┌────────────┐  ┌──────────────────┐
- │ llama.cpp  │  │ ComfyUI Qwen-IMG │  ← started at A-PROX boot, stays up
+ │ llama.cpp  │  │ ComfyUI Qwen-IMG │  ← booted per image job, stopped after
  └────────────┘  └──────────────────┘
 ```
 
 - **Port 8000** — A-PROX gateway. Clients connect here.
 - **Port 8080** — llama.cpp server. Only reachable on `localhost` (behind A-PROX). A-PROX launches it from `[llama_server]` (paused during image jobs and restarted after).
-- **Port 8188** — Managed ComfyUI backend used for `image_generate`; started eagerly at A-PROX boot (like llama.cpp) and left running.
+- **Port 8188** — Managed ComfyUI backend used for `image_generate`; not started at boot — it is booted on demand for each image job (after llama.cpp is paused) and fully stopped once the job finishes, releasing its VRAM back to llama.cpp.
 - **API Key** — Not enforced on `/v1/*`, `/ingestion/*`, `/monitor/*`; when a key *is* provided to `/monitor/api` or `/monitor/stream` it is compared against `upstream.api_key`.
 
 ---
@@ -55,7 +55,7 @@ A-PROX was built for a machine where the GPU is fully occupied:
 1. **Rust toolchain** — Install via [rustup](https://rustup.rs/): `curl --proto '=https' --tlsv1.2 -sSf https://rustup.rs | sh`
 2. **llama.cpp** — A-PROX owns and launches `llama-server` itself from the `[llama_server]` config block (spawned on `127.0.0.1:8080`, no `--load-mode mlock`). You no longer need to launch it manually first — but an externally-running instance at the same URL is also detected and reused.
 3. **Optional: SearXNG** — For live web search, A-PROX manages a local SearXNG instance on port 8888. It works without it (returns placeholder results).
-4. **Optional: ComfyUI (image generation)** — For `image_generate` to work, a Qwen-Image 2.1 GGUF ComfyUI install is configured in `[comfy_ui]`. When enabled, A-PROX starts it eagerly at boot alongside llama.cpp (both backends' stdout/stderr are piped to the A-PROX console so you can watch model-load progress from one terminal).
+4. **Optional: ComfyUI (image generation)** — For `image_generate` to work, a Qwen-Image 2.1 GGUF ComfyUI install is configured in `[comfy_ui]`. When enabled, A-PROX boots it on demand for each image job — after pausing llama.cpp — and stops it again once the job finishes, so it never holds VRAM while idle. Both backends' stdout/stderr are piped to the A-PROX console so you can watch model-load progress from one terminal.
 
 ---
 
@@ -775,12 +775,13 @@ ComfyUI (Qwen-Image 2.1 GGUF) backend. Full design/wiring details live in
    extended with a `HARNESS_DIRECTIVE` (JSON schema for the tool call). If the model
    emits bare JSON instead of a structured tool call, `try_parse_image_generate_json`
    recovers it.
-3. **Phase B (generate)** — A-PROX ensures ComfyUI is up (port `8188`), SIGTERMs
-   llama.cpp (≤30s, SIGKILL fallback), uploads the reference image (i2i), injects
-   `workflows/t2i.json` / `i2i.json` (per-job random KSampler seed), submits and polls the job
-   (≤ `generation_timeout_s`), downloads the PNG via `/view`, saves it to the serve
-   dir, then **restarts llama.cpp** (≤ `health_timeout_s`, default 600s — long enough
-   for cold boots). The concurrency permit is
+3. **Phase B (generate)** — A-PROX SIGTERMs llama.cpp (≤30s, SIGKILL fallback),
+   then boots ComfyUI for this job only (port `8188`), uploads the reference image
+   (i2i), injects `workflows/t2i.json` / `i2i.json` (per-job random KSampler seed),
+   submits and polls the job (≤ `generation_timeout_s`), downloads the PNG via
+   `/view`, saves it to the serve dir, then **fully stops ComfyUI** (releasing its
+   VRAM) and **restarts llama.cpp** (≤ `health_timeout_s`, default 600s — long
+   enough for cold boots). The concurrency permit is
    held for the whole job (chat requests queue during the llama downtime).
 4. **Phase C (return)** — A synthetic user message (text + base64 data-URL of the
    PNG) is appended so llama.cpp (vision) can stream a caption. One
@@ -788,9 +789,11 @@ ComfyUI (Qwen-Image 2.1 GGUF) backend. Full design/wiring details live in
    `image_url` on the response JSON). The PNG is also served at
    `GET /images/{name}`.
 
-Both backends are started eagerly at A-PROX boot (concurrently, see `state.rs`) and
-their stdout/stderr are piped to the A-PROX console, so llama.cpp token counts and
-ComfyUI workflow progress appear in the same terminal you launched A-PROX from.
+Only llama.cpp is started eagerly at A-PROX boot (see `state.rs`); ComfyUI is
+booted on demand per image job and never stays up between requests.
+Both backends' stdout/stderr are piped to the A-PROX console, so llama.cpp token
+counts and ComfyUI workflow progress appear in the same terminal you launched
+A-PROX from.
 
 Resolution math (`src/imagegen/ratio.rs`): target 2 MP from `wh_ratio`, both sides
 rounded to a multiple of 16, capped at 4096; `ratio_follow="<image1>"` uses the
@@ -817,7 +820,7 @@ port = 8080
 api_key = "…"             # must match upstream.api_key
 health_timeout_s = 600    # cold boots (HDD model load) can take minutes
 
-[comfy_ui]                # managed ComfyUI backend, started at boot like llama.cpp
+[comfy_ui]                # managed ComfyUI backend, booted per image job
 enabled = true
 url = "http://127.0.0.1:8188"
 workdir = "/path/to/ComfyUI"            # ComfyUI install directory (the venv lives here)
@@ -838,15 +841,24 @@ i2i_workflow = "workflows/i2i.json"
 t2i_prompt_file = "prompts/t-iprompt.txt"
 i2i_prompt_file = "prompts/i-iprompt.txt"
 serve_dir = "data/generated_images"
-public_base_url = ""            # if set, image_url points here instead of http://127.0.0.1:{port}
+public_base_url = ""            # if set, image_url points here (highest priority)
+inline_data_url = false         # true → emit image_url as a base64 data-URL (needs client-side decoding)
 poll_interval_ms = 2000
 generation_timeout_s = 180
 default_negative_prompt = "bad anatomy, bad composition, bad lighting, distorted face, extra limbs, low quality, out of focus, overexposed, plastic, poor symmetry, signature, watermark, ugly, censored"
 ```
 
-An empty `public_base_url` makes served `image_url`s use
-`http://127.0.0.1:{server.port}`, which is what CLAN on the same machine or LAN
-needs. Point it at your public host for remote clients.
+Artifact URL resolution order (used for both `image_url` and `file_url`):
+1. `inline_data_url: true` → the URL is a base64 `data:` URI (works anywhere the
+   client can decode the payload, even when `/images`/`/files` isn't routable; the
+   client must decode with `Image.memory`, not `Image.network`);
+2. config `public_base_url` (explicit override; point it at your public host for
+   remote clients);
+3. `X-Forwarded-Proto` + `X-Forwarded-Host` (when A-PROX sits behind a TLS reverse
+   proxy);
+4. the request `Host` header — the address the client actually dialed (loopback,
+   LAN IP, public IP, or proxy domain);
+5. fallback `http://127.0.0.1:{server.port}` for direct loopback use.
 
 ---
 
@@ -888,10 +900,15 @@ but without any ComfyUI/llama-stop overhead.
 [file_generation]
 enabled = true
 serve_dir = "data/generated_files"
-public_base_url = ""            # if set, file_url points here instead of http://127.0.0.1:{port}
+public_base_url = ""            # if set, file_url points here (highest priority)
+inline_data_url = false         # true → emit file_url as a base64 data-URL (needs client-side decoding)
 max_content_chars = 24000       # per-call content cap; larger → model splits with mode=append
 deny_exts = ["exe", "sh", "bat", "com", "cmd", "dll", "so", "sys", "html", "htm", "php", "jar"]
 ```
+
+File URLs resolve through the same `image_url`/`file_url` order above (config →
+forwarded headers → request `Host` → loopback); see the image-generation
+configuration table for an inline base64 data-URL option.
 
 ---
 

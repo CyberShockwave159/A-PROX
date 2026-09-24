@@ -1,14 +1,17 @@
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
 use crate::config::ComfyUiConfig;
 
-/// Manages the ComfyUI backend used for image generation. ComfyUI is left
-/// running/loaded after a job (models auto-unload); it is only spawned the
-/// first time it is needed and never stopped between requests.
+/// Grace period for ComfyUI to exit after SIGTERM before sending SIGKILL.
+const STOP_GRACE_S: u64 = 30;
+
+/// Manages the ComfyUI backend used for image generation. ComfyUI is only
+/// started on demand for an image job (after llama.cpp is stopped) and fully
+/// stopped once the job finishes, so its VRAM is released back to llama.cpp.
 pub struct ComfyUIManager {
     child: Mutex<Option<Child>>,
     url: String,
@@ -242,6 +245,48 @@ impl ComfyUIManager {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .ok_or_else(|| anyhow::anyhow!("missing 'name' in /upload/image response"))
+    }
+
+    /// Fully stop the managed ComfyUI subprocess: SIGTERM, wait up to
+    /// `stop_grace_s`, then SIGKILL fallback. No-op when no subprocess is held.
+    /// Only kills the process A-PROX spawned; an externally-run instance is
+    /// left alone.
+    pub fn stop(&self) {
+        let mut guard = self.child.lock().unwrap();
+        if let Some(ref mut child) = guard.as_mut() {
+            let pid = child.id();
+            tracing::info!("Sending SIGTERM to ComfyUI (pid {pid})...");
+            unsafe {
+                libc::kill(pid as i32, libc::SIGTERM);
+            }
+
+            let start = Instant::now();
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_status)) => {
+                        tracing::info!("ComfyUI stopped gracefully.");
+                        break;
+                    }
+                    Ok(None) => {
+                        if start.elapsed() > Duration::from_secs(STOP_GRACE_S) {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                    Err(_) => break,
+                }
+            }
+
+            match child.try_wait() {
+                Ok(None) => {
+                    tracing::warn!("ComfyUI did not exit after SIGTERM; sending SIGKILL");
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                _ => {}
+            }
+            *guard = None;
+        }
     }
 
     pub fn has_child(&self) -> bool {

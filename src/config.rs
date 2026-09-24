@@ -281,6 +281,13 @@ pub struct ImageGenerationConfig {
     pub serve_dir: String,
     #[serde(default)]
     pub public_base_url: String,
+    /// When true, the emitted `image_url` is a base64 data-URL of the PNG
+    /// instead of a served `http(s)://…/images/…` URL. Works anywhere the
+    /// client can decode the payload, even when `/images` is unreachable
+    /// (firewalled port / no reverse proxy); requires client-side base64
+    /// decoding (`Image.memory`) instead of `Image.network`.
+    #[serde(default)]
+    pub inline_data_url: bool,
     #[serde(default = "default_generation_timeout_s")]
     pub generation_timeout_s: u64,
     #[serde(default = "default_poll_interval_ms")]
@@ -304,6 +311,7 @@ impl Default for ImageGenerationConfig {
             default_negative_prompt: default_negative_prompt(),
             serve_dir: "data/generated_images".to_string(),
             public_base_url: String::new(),
+            inline_data_url: false,
             generation_timeout_s: 180,
             poll_interval_ms: 2000,
         }
@@ -344,6 +352,11 @@ pub struct FileGenerationConfig {
     pub serve_dir: String,
     #[serde(default)]
     pub public_base_url: String,
+    /// When true, the emitted `file_url` is a base64 data-URL (`data:<mime>;base64,…`)
+    /// instead of a served `http(s)://…/files/…` URL. Same tradeoffs as
+    /// `[image_generation].inline_data_url`.
+    #[serde(default)]
+    pub inline_data_url: bool,
     #[serde(default = "default_max_content_chars")]
     pub max_content_chars: usize,
     #[serde(default)]
@@ -356,6 +369,7 @@ impl Default for FileGenerationConfig {
             enabled: false,
             serve_dir: default_file_serve_dir(),
             public_base_url: String::new(),
+            inline_data_url: false,
             max_content_chars: default_max_content_chars(),
             deny_exts: Vec::new(),
         }

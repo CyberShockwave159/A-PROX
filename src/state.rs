@@ -105,12 +105,14 @@ impl AppState {
         let comfy_ui_manager: Arc<ComfyUIManager> =
             Arc::new(ComfyUIManager::new(config.comfy_ui.url.clone()));
 
-        // Boot both backends eagerly at startup, concurrently: llama is needed for
-        // every model API request and ComfyUI for image jobs. Both may take minutes
-        // to become healthy on a cold boot (HDD model load / torch import), so the
-        // wait is bounded by each manager's health_timeout_s (default 600s).
-        // Failures are tolerated at boot — the managers retry/spawn on demand
-        // (see routes.rs + imagegen service).
+        // Boot llama eagerly at startup: it is needed for every model API
+        // request. ComfyUI is intentionally NOT booted here — it is only
+        // started on demand for an image job (see ImageGenService::generate),
+        // after llama.cpp has been stopped, and is stopped again once the job
+        // finishes so its VRAM never lingers idle. The llama wait is bounded by
+        // health_timeout_s (default 600s cold boot). Failures are tolerated at
+        // boot — the manager retries/spawns on demand (see routes.rs +
+        // imagegen service).
         let llama_boot = async {
             if !config.llama_server.enabled {
                 return;
@@ -132,24 +134,7 @@ impl AppState {
             }
         };
 
-        let comfy_boot = async {
-            if !config.comfy_ui.enabled {
-                return;
-            }
-            match comfy_ui_manager
-                .ensure_running(&config.comfy_ui, &http_client)
-                .await
-            {
-                Ok(_) => {
-                    tracing::info!("Managed ComfyUI is ready at {}", config.comfy_ui.url);
-                }
-                Err(e) => tracing::warn!(
-                    "managed ComfyUI failed to start (will retry on demand): {e}"
-                ),
-            }
-        };
-
-        tokio::join!(llama_boot, comfy_boot);
+        llama_boot.await;
 
         let image_store = Arc::new(ImageStore::new(&config.image_generation.serve_dir)?);
         let file_store = Arc::new(FileStore::new(&config.file_generation.serve_dir)?);

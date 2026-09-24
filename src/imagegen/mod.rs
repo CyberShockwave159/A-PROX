@@ -4,7 +4,7 @@ mod tests;
 pub mod orchestrator;
 pub mod ratio;
 
-pub use orchestrator::{GeneratedImage, GenerateRequest, ImageGenService};
+pub use orchestrator::{image_served_url, GeneratedImage, GenerateRequest, ImageGenService};
 pub use ratio::compute_dimensions;
 
 use crate::comfy_ui::WorkflowKind;
