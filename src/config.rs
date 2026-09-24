@@ -181,6 +181,11 @@ pub struct LlamaServerConfig {
     pub health_timeout_s: u64,
     #[serde(default = "default_stop_grace_s")]
     pub stop_grace_s: u64,
+    /// Raw llama.cpp flags appended verbatim to the command line, e.g.
+    /// `["--rope-scaling", "yarn"]`. Appended last; use to pass any flag not
+    /// covered by the typed fields above, or to override them.
+    #[serde(default)]
+    pub extra_args: Vec<String>,
 }
 
 impl Default for LlamaServerConfig {
@@ -210,6 +215,7 @@ impl Default for LlamaServerConfig {
             load_mode: "none".to_string(),
             health_timeout_s: 600,
             stop_grace_s: 30,
+            extra_args: Vec::new(),
         }
     }
 }

@@ -243,5 +243,9 @@ fn build_args(cfg: &LlamaServerConfig) -> Vec<String> {
         args.push(load_mode.to_string());
     }
 
+    for flag in &cfg.extra_args {
+        args.push(flag.clone());
+    }
+
     args
 }

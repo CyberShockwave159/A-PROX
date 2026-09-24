@@ -102,7 +102,7 @@ Expected response:
 {
   "status": "healthy",
   "service": "A-PROX",
-  "version": "0.1.0",
+  "version": "1.2.1",
   "hardware": {
     "total_ram_gb": "125.7",
     "available_ram_gb": "97.7",
