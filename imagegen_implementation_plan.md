@@ -55,7 +55,7 @@ client ──POST /v1/chat/completions (stream)──▶ A-PROX
               │     WxH from ratio math / ratio_follow dims)
               │  5. POST /prompt; poll /history/{id} (2s, ≤180s)
               │  6. GET /view → PNG → save data/generated_images/gen_<id>.png
-              │  7. relaunch llama.cpp (no mlock), wait /health (≤120s)
+              │  7. relaunch llama.cpp (no mlock), wait /health (≤ `health_timeout_s`, default 600s)
               ▼
    final turn: A-PROX injects synthetic user message (text + base64 data URL
                of generated image) → llama.cpp (vision) streams caption
@@ -112,7 +112,7 @@ image_min_tokens = 1024
 image_max_tokens = 2048
 cors_origins = "http://0.0.0.0:8082"
 load_mode = "none"                 # was --load-mode mlock; dropped per decision #1
-health_timeout_s = 120
+health_timeout_s = 600             # cold boots (HDD model load) can take 5-8 min
 stop_grace_s = 30
 
 [comfy_ui]
@@ -121,7 +121,7 @@ url = "http://127.0.0.1:8188"
 workdir = "/run/media/jstanton/MNT G (SSD 1T)/ComfyUI"
 python = "/run/media/jstanton/MNT G (SSD 1T)/ComfyUI/bin/python"
 args = ["main.py", "--enable-manager"]
-health_timeout_s = 120
+health_timeout_s = 600             # eager boot at A-PROX startup, like llama.cpp
 poll_interval_ms = 2000
 generation_timeout_s = 180
 
@@ -255,7 +255,7 @@ The LLM may emit ratios outside `ResolutionSelector`'s 8 options (e.g. `1:2`, `2
 ## 11. llama_server Manager
 
 Mirror `src/searxng/manager.rs` pattern (struct behind `Mutex<Option<Child>>`, `start`/`is_running`/`stop`, Drop → stop):
-- `start`: assemble args from `[llama_server]` EXACTLY as today's manual command minus `--load-mode mlock`; spawn with `stdin/out/err` to null (or log); poll `GET {host}:{port}/health` ≤ `health_timeout_s`; premature exit → Err.
+- `start`: assemble args from `[llama_server]` EXACTLY as today's manual command minus `--load-mode mlock`; spawn with stdin null, stdout/stderr inherited (forwarded to the A-PROX console); poll `GET {host}:{port}/health` ≤ `health_timeout_s`; premature exit → Err.
 - `stop`: SIGTERM via `libc::kill(pid, SIGTERM)`, wait ≤ `stop_grace_s` (100ms poll), SIGKILL fallback (`Child::kill`), clear slot.
 - `is_up`: health probe.
 - Only one manager instance; constructed in `AppState::new`; started iff `llama_server.enabled` (default true once A-PROX owns it — user stops manual launching).
@@ -274,7 +274,7 @@ Mirror `src/searxng/manager.rs` pattern (struct behind `Mutex<Option<Child>>`, `
 4. bake template: `prompt`, `negative_prompt` (config), random seed ≥ 0 (KSampler rejects -1), WxH (§9), `filename_prefix = gen_<id>`
 5. submit + poll history (≤180s) + fetch PNG
 6. store → `GET /images/gen_<id>.png`
-7. relaunch llama; wait /health (≤120s)
+7. relaunch llama; wait /health (≤ `health_timeout_s`, default 600s)
 8. return `{status:"ok", image_url, image_path, prompt}`
 - Performed BEFORE `execute_tool` returns so the tool result carries `image_url`; RAII guarantees llama restart on error.
 

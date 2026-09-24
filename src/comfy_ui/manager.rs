@@ -55,8 +55,10 @@ impl ComfyUIManager {
         cmd.args(&cfg.args);
         cmd.current_dir(workdir);
         cmd.stdin(Stdio::null());
-        cmd.stdout(Stdio::null());
-        cmd.stderr(Stdio::null());
+        // Forward ComfyUI's stdout/stderr to the A-PROX console so the user sees
+        // the backend's log output (model loads, workflow progress, errors).
+        cmd.stdout(Stdio::inherit());
+        cmd.stderr(Stdio::inherit());
 
         let child = match cmd.spawn() {
             Ok(c) => c,

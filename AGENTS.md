@@ -2,8 +2,8 @@
 
 ## Port Map
 - **8000** → A-PROX (public).
-- **8080** → llama.cpp upstream (localhost only). **Owned by A-PROX** since image-gen (spawned without `--load-mode mlock` from `[llama_server]` config). Must run with `--api-key` matching `upstream.api_key` + `[llama_server].api_key`; A-PROX sends that key as `Authorization: Bearer` on every upstream call (e.g. `routes.rs:63`).
-- **8188** → Managed ComfyUI backend (`[comfy_ui]`, image generation). Spawned lazily on first image job, stays up.
+- **8080** → llama.cpp upstream (localhost only). **Owned by A-PROX** since image-gen (spawned without `--load-mode mlock` from `[llama_server]` config). Must run with `--api-key` matching `upstream.api_key` + `[llama_server].api_key`; A-PROX sends that key as `Authorization: Bearer` on every upstream call (e.g. `routes.rs:63`). Both managed subprocesses (llama + ComfyUI) are spawned with `stdout`/`stderr` inherited, so their logs appear on the A-PROX console.
+- **8188** → Managed ComfyUI backend (`[comfy_ui]`, image generation). Started eagerly at A-PROX boot (like llama.cpp), stays up.
 - **8888** → Managed SearXNG (optional, enabled by default).
 - **`GET /images/{name}`** on the A-PROX server → serves generated PNGs from `[image_generation].serve_dir`.
 - **`GET /files/{name}`** on the A-PROX server → serves generated text files from `[file_generation].serve_dir` (`data/generated_files`).
@@ -21,7 +21,7 @@ Arrived after the image pipeline; a file request (latest user turn matched by `F
 Canonical reference: `imagegen_implementation_plan.md`. Pipeline (Phase A/B/C) in `src/server/routes.rs` + `src/imagegen/orchestrator.rs`:
 - A request whose latest user turn has `image_url` parts (→ i2i) or t2i verb keywords routes into the existing `AgenticToolLoop` with one extra tool `image_generate` armed (defined in `tools/registry.rs::image_generate_definition`, dispatched in routes.rs — see `maybe_execute_image_generate`, NOT the registry arm, which returns an error string).
 - Phase A: llama.cpp (vision) rewrites the request per workflow system prompt (`prompts/t-iprompt.txt` / `prompts/i-iprompt.txt` + `HARNESS_DIRECTIVE`). `try_parse_image_generate_json` is the bare-JSON fallback when the model skips a structured tool call.
-- Phase B: `ImageGenService::generate` — ensure ComfyUI up → SIGTERM llama (≤30s, SIGKILL fallback) → upload ref image (i2i) → inject `workflows/t2i.json`/`i2i.json` (nodes: 1 unet, 2 clip, 5 KSampler random seed ≥0 — ComfyUI rejects -1, 8 TextEncodeQwenImage21, 26 EmptyLatentImage dims; i2i: 11 LoadImage, 32 ResizeImageMaskNode dims) → submit+poll `/history/<id>` (≤180s) → `/view` → save PNG → **restart llama.cpp unconditionally** (≤120s /health). The concurrency permit is held the whole time (max 1 image job, chat queued during downtime).
+- Phase B: `ImageGenService::generate` — ensure ComfyUI up → SIGTERM llama (≤30s, SIGKILL fallback) → upload ref image (i2i) → inject `workflows/t2i.json`/`i2i.json` (nodes: 1 unet, 2 clip, 5 KSampler random seed ≥0 — ComfyUI rejects -1, 8 TextEncodeQwenImage21, 26 EmptyLatentImage dims; i2i: 11 LoadImage, 32 ResizeImageMaskNode dims) → submit+poll `/history/<id>` (≤180s) → `/view` → save PNG → **restart llama.cpp unconditionally** (≤ `health_timeout_s`, default 600s for cold boots). Both backends boot eagerly and concurrently at A-PROX startup (`state.rs`, `tokio::join!`). The concurrency permit is held the whole time (max 1 image job, chat queued during downtime).
 - Phase C: synthetic user message (text + base64 data-URL of the PNG) → llama streams caption; ONE `delta.image_url` SSE event emitted before text (`image_url_sse_payload`); non-streaming: `image_url` on outer JSON.
 - Resolution math (`src/imagegen/ratio.rs`): target 2 MP from `wh_ratio`, multiple-of-16, cap 4096; `ratio_follow=<image1>` uses the reference image's own dims; `ResolutionSelector` (node 10) is left dormant.
 - **Never emit `content` as a JSON array** in SSE deltas — CLAN `sse_client.dart:362` casts `delta['content']` to String and throws.
@@ -111,8 +111,8 @@ All routes in `src/server/mod.rs`; auth column reflects the *current* code (see 
 - `src/imagegen/` — `orchestrator.rs` (ImageGenService: ComfyUI submit/poll/fetch + llama lifecycle), `ratio.rs` (WxH math), `mod.rs` (intent keywords, prompt loading, bare-JSON parse)
 - `src/filegen/mod.rs` — write_file detection (`is_file_request`, keyword + verb/cue signals), `FILE_DIRECTIVE`, `clean_filename`, `is_denied_extension`, bare-JSON fallback (+ inline tests)
 - `src/files/` — `store.rs` (FileStore on `[file_generation].serve_dir`: save/append/resolve/read, MIME map) + `GeneratedFile`
-- `src/comfy_ui/` — `manager.rs` (ComfyUIManager: ensure-running, submit, poll, view, upload-image), `workflow.rs` (WorkflowTemplate: node/input injection)
-- `src/llama_server/` — `manager.rs` (LlamaServerManager: spawn no-mlock, /health wait, SIGTERM/SIGKILL stop)
+- `src/comfy_ui/` — `manager.rs` (ComfyUIManager: ensure-running, submit, poll, view, upload-image; spawns via venv `python` + `workdir`/`args`, stdout/stderr inherited), `workflow.rs` (WorkflowTemplate: node/input injection)
+- `src/llama_server/` — `manager.rs` (LlamaServerManager: spawn no-mlock, /health wait ≤ `health_timeout_s`, SIGTERM/SIGKILL stop, stdout/stderr inherited)
 - `src/images/` — `store.rs` (ImageStore on `[image_generation].serve_dir`) + serving via `serve_image`
 - `src/server/middleware.rs` — `ApiKey` extractor (defined, currently unused)
 - `src/server/mod.rs` — `build_router`: route table + server startup

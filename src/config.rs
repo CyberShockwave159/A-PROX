@@ -208,7 +208,7 @@ impl Default for LlamaServerConfig {
             image_max_tokens: 2048,
             cors_origins: String::new(),
             load_mode: "none".to_string(),
-            health_timeout_s: 120,
+            health_timeout_s: 600,
             stop_grace_s: 30,
         }
     }
@@ -239,7 +239,7 @@ impl Default for ComfyUiConfig {
             workdir: String::new(),
             python: String::new(),
             args: vec!["main.py".to_string(), "--enable-manager".to_string()],
-            health_timeout_s: 120,
+            health_timeout_s: 600,
         }
     }
 }
@@ -317,7 +317,7 @@ fn default_ubatch_size() -> usize { 1024 }
 fn default_image_min_tokens() -> u32 { 1024 }
 fn default_image_max_tokens() -> u32 { 2048 }
 fn default_load_mode() -> String { "none".to_string() }
-fn default_health_timeout_s() -> u64 { 120 }
+fn default_health_timeout_s() -> u64 { 600 }
 fn default_stop_grace_s() -> u64 { 30 }
 fn default_comfy_url() -> String { "http://127.0.0.1:8188".to_string() }
 fn default_mp() -> f64 { 2.0 }

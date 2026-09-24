@@ -77,8 +77,10 @@ impl LlamaServerManager {
         let child = Command::new(executable)
             .args(&cmd)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            // Forward llama.cpp's stdout/stderr to the A-PROX console so the
+            // user sees what the backend is doing (model load progress, etc.).
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
             .spawn()
             .map_err(|e| anyhow::anyhow!("failed to spawn llama-server: {e}"))?;
 

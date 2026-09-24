@@ -105,10 +105,16 @@ impl AppState {
         let comfy_ui_manager: Arc<ComfyUIManager> =
             Arc::new(ComfyUIManager::new(config.comfy_ui.url.clone()));
 
-        // Boot both backends lazily: llama is needed for every model API request,
-        // ComfyUI only when an image job arrives. Failures are tolerated at boot —
-        // the managers retry/spawn on demand (see routes.rs + imagegen service).
-        if config.llama_server.enabled {
+        // Boot both backends eagerly at startup, concurrently: llama is needed for
+        // every model API request and ComfyUI for image jobs. Both may take minutes
+        // to become healthy on a cold boot (HDD model load / torch import), so the
+        // wait is bounded by each manager's health_timeout_s (default 600s).
+        // Failures are tolerated at boot — the managers retry/spawn on demand
+        // (see routes.rs + imagegen service).
+        let llama_boot = async {
+            if !config.llama_server.enabled {
+                return;
+            }
             match llama_server_manager
                 .start(&config.llama_server, &http_client)
                 .await
@@ -124,7 +130,26 @@ impl AppState {
                     "managed llama.cpp failed to start (will retry on demand): {e}"
                 ),
             }
-        }
+        };
+
+        let comfy_boot = async {
+            if !config.comfy_ui.enabled {
+                return;
+            }
+            match comfy_ui_manager
+                .ensure_running(&config.comfy_ui, &http_client)
+                .await
+            {
+                Ok(_) => {
+                    tracing::info!("Managed ComfyUI is ready at {}", config.comfy_ui.url);
+                }
+                Err(e) => tracing::warn!(
+                    "managed ComfyUI failed to start (will retry on demand): {e}"
+                ),
+            }
+        };
+
+        tokio::join!(llama_boot, comfy_boot);
 
         let image_store = Arc::new(ImageStore::new(&config.image_generation.serve_dir)?);
         let file_store = Arc::new(FileStore::new(&config.file_generation.serve_dir)?);
