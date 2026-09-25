@@ -609,7 +609,7 @@ impl<S> Drop for CountingStream<S> {
     }
 }
 
-pub async fn forward_to_upstream(
+async fn forward_to_upstream(
     state: &Arc<AppState>,
     payload: Value,
     is_streaming: bool,
@@ -689,30 +689,30 @@ pub async fn forward_to_upstream(
 /// State carried through the agentic loop for an image-generation request.
 /// Populated by `prepare_image_request` when the latest user turn looks like an
 /// image request (attached photo → i2i, generation phrase → t2i).
-pub struct ImageGenContext {
-    pub request_kind: WorkflowKind,
+struct ImageGenContext {
+    request_kind: WorkflowKind,
     /// (bytes, (width, height)) of the attached reference image, if any.
-    pub reference_image: Option<(Vec<u8>, (u32, u32))>,
+    reference_image: Option<(Vec<u8>, (u32, u32))>,
     /// Filled in by `maybe_execute_image_generate` once the tool has run.
-    pub result: Option<GeneratedImage>,
-    pub failed: bool,
+    result: Option<GeneratedImage>,
+    failed: bool,
     /// The rewritten prompt used for the generation (surface in the tool result).
-    pub last_prompt: String,
+    last_prompt: String,
     /// Externally-addressable base URL for the served image (config override →
     /// forwarded headers → request `Host` → loopback fallback).
-    pub public_base: String,
+    public_base: String,
 }
 
 /// State carried through the agentic loop for a file-write request. Populated by
 /// `prepare_file_request`. `active` tracks the file being appended to so that
 /// `mode=append` chunks continue the same logical file across turns.
-pub struct FileGenContext {
-    pub active: Option<GeneratedFile>,
-    pub result: Option<GeneratedFile>,
-    pub failed: bool,
+struct FileGenContext {
+    active: Option<GeneratedFile>,
+    result: Option<GeneratedFile>,
+    failed: bool,
     /// Externally-addressable base URL for the served file (config override →
     /// forwarded headers → request `Host` → loopback fallback).
-    pub public_base: String,
+    public_base: String,
 }
 
 /// Resolve the externally-addressable base URL for generated artifacts, using
@@ -723,7 +723,7 @@ pub struct FileGenContext {
 ///      `X-Forwarded-Host` (first value) — TLS reverse proxies;
 ///   3. the request `Host` header (LAN IP, public IP, or proxy domain);
 ///   4. loopback fallback `http://127.0.0.1:{server_port}` for direct local use.
-pub fn artifact_base_url(cfg_override: &str, headers: &HeaderMap, server_port: u16) -> String {
+fn artifact_base_url(cfg_override: &str, headers: &HeaderMap, server_port: u16) -> String {
     let trimmed = cfg_override.trim();
     if !trimmed.is_empty() {
         return trimmed.trim_end_matches('/').to_string();
@@ -763,7 +763,7 @@ pub fn artifact_base_url(cfg_override: &str, headers: &HeaderMap, server_port: u
 ///  - appends the workflow-specific image-generator system prompt + harness
 ///    directive as a dedicated system message (verbatim, not merged),
 ///  - captures the attached reference image so `image_generate` can upload it.
-pub fn prepare_image_request(
+fn prepare_image_request(
     state: &Arc<AppState>,
     messages: &mut Vec<ChatMessage>,
     public_base: &str,
@@ -803,7 +803,7 @@ pub fn prepare_image_request(
 
 /// Detect a file-write request in the latest user turn and arm the write_file
 /// pipeline context (mirrors `prepare_image_request`, no backend involved).
-pub fn prepare_file_request(
+fn prepare_file_request(
     state: &Arc<AppState>,
     messages: &mut Vec<ChatMessage>,
     public_base: &str,
@@ -1361,7 +1361,7 @@ fn inject_generated_image_as_user_msg(
     });
 }
 
-pub async fn execute_agentic_loop(
+async fn execute_agentic_loop(
     state: &Arc<AppState>,
     mut payload: Value,
     mut messages: Vec<ChatMessage>,
@@ -2324,7 +2324,7 @@ fn escape_sse_string(s: &str) -> String {
         .replace('\t', "\\t")
 }
 
-pub fn inject_context_into_messages(messages: &mut Vec<ChatMessage>, context_block: &str) {
+fn inject_context_into_messages(messages: &mut Vec<ChatMessage>, context_block: &str) {
     if let Some(user_msg) = messages.iter_mut().rev().find(|m| m.role == "user") {
         let current_text = user_msg.content_as_str();
         let augmented = format!("{}\n\n{}", context_block, current_text);

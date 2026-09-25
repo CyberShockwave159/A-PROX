@@ -103,11 +103,6 @@ All routes in `src/server/mod.rs`; auth column reflects the *current* code (see 
 | `/monitor/stream` | GET | None | SSE broadcast for live monitor |
 | `/v1/models` | GET | None | Proxies upstream `/v1/models` |
 | `/v1/chat/completions` | POST | **None enforced** | Main chat endpoint (incl. image generation) |
-| `/v1/chat/completions/async` | POST | **None enforced** | Submit async request (returns request_id) |
-| `/v1/chat/completions/{id}/stream` | GET | **None enforced** | Resume SSE stream for async request |
-| `/v1/chat/completions/{id}/result` | GET | **None enforced** | Fetch final cached result |
-| `/v1/chat/completions/{id}/status` | GET | **None enforced** | Poll async request status |
-| `/v1/chat/completions/{id}` | DELETE | **None enforced** | Cancel async request |
 | `/ingestion/reindex` | POST | **None enforced** | Force full directory re-index |
 | `/ingestion/status` | GET | **None enforced** | Get indexing stats |
 | `/images/{name}` | GET | None | Serve stored generated PNGs |
@@ -150,15 +145,3 @@ All routes in `src/server/mod.rs`; auth column reflects the *current* code (see 
 - **SearXNG install location**: `download_searxng.sh` and the manager install to `[searxng] install_dir` (default `~/.local/share/a-prox-searxng`), **not** the repo `searxng/` dir — though `run.sh` probes repo-local `searxng/.venv` first. Requires Python 3.10+ (`python3 -m venv` + pip). Disable via `[searxng] enabled = false`.
 - **Don't trust README auth/CLI claims**: there is no enforced API key and no `--api-key` flag (see Auth section).
 - **`image_generate` is intercepted in routes.rs, not the registry**: the `registry.rs::execute_tool` arm returns an explanatory error string; real dispatch happens in `maybe_execute_image_generate` (needs permit + `ImageGenContext`). Same for `write_file` → `maybe_execute_write_file` (no permit needed).
-
-## Async Request Queue (A-PROX `async` endpoints)
-- **Database**: `async_requests` table in `data/a_prox.db` (schema added via `src/db/schema.rs` INIT_SQL). Fields: `id` (client-provided UUID), `payload` (full request JSON), `status` (`queued`/`processing`/`completed`/`failed`/`cancelled`), `result` (final response JSON), `created_at`/`updated_at`/`expires_at` (Unix seconds), `route_decision`, `tokens_received`, `error`. Indexes on `status` and `expires_at`.
-- **Worker**: `AsyncQueueWorker` in `src/async_queue/worker.rs` — background task with semaphore-limited concurrency (`config.async.max_concurrent`, default 1). Pulls `queued` requests, processes via existing routing logic (`execute_agentic_loop`, `forward_to_upstream`, etc.), stores result, updates monitor. Cleanup task runs every `config.async.cleanup_interval_minutes` (default 5m) to delete expired requests.
-- **Endpoints** (in `src/async_queue/endpoints.rs`):
-  - `POST /v1/chat/completions/async` — idempotent submit (client provides or server generates UUID), returns `{request_id, status: "queued"}`.
-  - `GET /v1/chat/completions/{id}/status` — poll status.
-  - `GET /v1/chat/completions/{id}/result` — fetch final result (400 if not terminal).
-  - `GET /v1/chat/completions/{id}/stream` — SSE stream: if `completed`, replays stored result; if `processing`/`queued`, waits and emits keepalives until complete.
-  - `DELETE /v1/chat/completions/{id}` — cancel (only non-terminal).
-- **Config** (`[async]` in `config/default.toml`): `enabled` (default true), `cache_ttl_hours` (default 1), `max_concurrent` (default 1), `cleanup_interval_minutes` (default 5).
-- **CLAN-AI integration**: CLAN-AI submits via `POST /async`, stores `PendingRequest` locally, resumes via `GET /:id/stream` on app lifecycle `resumed`/`inactive`. Thread edit/delete during background processing cancels old request, submits new at queue end.

@@ -32,9 +32,6 @@ pub enum AppError {
     #[error("Resource exhausted (RAM/Bus): {0}")]
     ResourceExhausted(String),
 
-    #[error("Not found: {0}")]
-    NotFound(String),
-
     #[error("Internal server error: {0}")]
     Internal(#[from] anyhow::Error),
 
@@ -69,7 +66,6 @@ impl IntoResponse for AppError {
             AppError::RateLimit(_) => (StatusCode::TOO_MANY_REQUESTS, "rate_limit_error"),
             AppError::ResourceExhausted(_) => (StatusCode::SERVICE_UNAVAILABLE, "resource_exhausted"),
             AppError::Upstream(_) => (StatusCode::BAD_GATEWAY, "upstream_error"),
-            AppError::NotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
             _ => (StatusCode::INTERNAL_SERVER_ERROR, "internal_server_error"),
         };
 

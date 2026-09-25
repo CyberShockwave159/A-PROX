@@ -19,7 +19,6 @@ pub mod searxng;
 pub mod server;
 pub mod state;
 pub mod tools;
-pub mod async_queue;
 
 pub use config::AppConfig;
 pub use state::AppState;

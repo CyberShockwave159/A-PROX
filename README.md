@@ -47,7 +47,6 @@ A-PROX was built for a machine where the GPU is fully occupied:
 6. **Tool Execution** — The LLM can call tools (`web_search`, `web_fetch`, `rag_search`, `rag_ingest`, `system_time`) in an autonomous loop of up to 5 turns. Image requests automatically arm an `image_generate` tool backed by a managed ComfyUI (Qwen-Image 2.1) backend, with A-PROX pausing llama.cpp while the image job runs and resuming it afterward. File-write requests arm a `write_file` tool that saves text/scripts to disk and serves them via `GET /files/{name}` (append support across turns).
 7. **System Guardrails** — Monitors free RAM and limits concurrent requests to protect the system.
 8. **Directory-Based Automatic Indexing** — Configures directories to scan for files; automatically extracts text, generates embeddings, and indexes documents into the RAG store. Supports live file watching, PDF processing via upstream multimodal endpoints, and per-directory collections.
-9. **Async Request Completion** — Clients can submit requests to `/v1/chat/completions/async` and immediately receive a request ID. A-PROX queues the request, processes it through the full routing/agentic pipeline (including image/file generation), and caches the result for up to 1 hour (configurable TTL). Clients can reconnect via `GET /{id}/stream` to resume the SSE stream, fetch the final result via `GET /{id}/result`, poll status via `GET /{id}/status`, or cancel via `DELETE /{id}`. Supports all streaming requests (chat, RAG, agentic tools, image generation, file generation). Survives A-PROX restarts via SQLite persistence.
 
 ---
 
@@ -201,44 +200,6 @@ curl -N -X POST http://localhost:8000/v1/chat/completions \
     "stream": true,
     "messages": [{"role": "user", "content": "Tell me a story."}]
   }'
-```
-
-### Async Request Completion (Background Processing)
-
-Submit a request for background processing — the server immediately returns a request ID and processes the request asynchronously. The client can reconnect later to resume the stream or fetch the final result.
-
-**Submit async request:**
-```bash
-curl -X POST http://localhost:8000/v1/chat/completions/async \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: a-prox-s3cur3k3y" \
-  -d '{
-    "model": "qwen3.6-35b-moe",
-    "stream": true,
-    "messages": [{"role": "user", "content": "Generate a detailed report on quantum computing."}]
-  }'
-```
-Response: `{"request_id": "abc123...", "status": "queued"}`
-
-**Resume SSE stream (reconnect):**
-```bash
-curl -N http://localhost:8000/v1/chat/completions/abc123.../stream
-```
-
-**Poll status:**
-```bash
-curl http://localhost:8000/v1/chat/completions/abc123.../status
-```
-Response: `{"request_id": "abc123...", "status": "processing", "route_decision": "AgenticToolLoop", "tokens_received": 0}`
-
-**Fetch final result:**
-```bash
-curl http://localhost:8000/v1/chat/completions/abc123.../result
-```
-
-**Cancel request:**
-```bash
-curl -X DELETE http://localhost:8000/v1/chat/completions/abc123...
 ```
 
 ### Health Check (no API key required)
