@@ -22,10 +22,12 @@ serde_json = "1.0"
 serde_yaml = "0.9"
 toml = "0.8"
 base64 = "0.22"
+uuid = { version = "1.0", features = ["v4", "serde"] }
 
 # Database & Vector Store
 rusqlite = { version = "0.32", features = ["bundled", "load_extension", "vtab"] }
 sqlite-vec = "=0.1.9"
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "chrono", "uuid", "json"] }
 
 # ONNX Runtime for CPU Embeddings
 ort = { version = "2.0.0-rc.13" }

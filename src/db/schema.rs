@@ -35,6 +35,23 @@ CREATE TABLE IF NOT EXISTS ingestion_sources (
     chunks_count INTEGER NOT NULL,
     collection TEXT NOT NULL
 );
+
+-- Async request queue & result cache
+CREATE TABLE IF NOT EXISTS async_requests (
+    id TEXT PRIMARY KEY,
+    payload TEXT NOT NULL,
+    status TEXT NOT NULL,
+    result TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    route_decision TEXT,
+    tokens_received INTEGER DEFAULT 0,
+    error TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_async_requests_status ON async_requests(status);
+CREATE INDEX IF NOT EXISTS idx_async_requests_expires ON async_requests(expires_at);
 "#;
 
 pub fn init_vec_table_sql(dimension: usize) -> String {

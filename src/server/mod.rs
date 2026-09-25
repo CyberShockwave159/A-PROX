@@ -22,6 +22,9 @@ use tower_http::trace::TraceLayer;
 pub const MAX_REQUEST_BODY_BYTES: usize = 100 * 1024 * 1024;
 
 use crate::state::AppState;
+use crate::async_queue::endpoints::{
+    cancel_async_request, get_async_result, get_async_status, stream_async_completion, submit_async_completion,
+};
 use routes::{chat_completions, health_check, ingestion_reindex, ingestion_status, list_models, monitor_api, monitor_dashboard, monitor_sse, monitor_statistics, serve_file, serve_image};
 
 pub fn build_router(state: Arc<AppState>) -> Router {
@@ -39,6 +42,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/monitor/stream", get(monitor_sse))
         .route("/v1/models", get(list_models))
         .route("/v1/chat/completions", post(chat_completions))
+        // Async completion endpoints
+        .route("/v1/chat/completions/async", post(submit_async_completion))
+        .route("/v1/chat/completions/{request_id}/status", get(get_async_status))
+        .route("/v1/chat/completions/{request_id}/result", get(get_async_result))
+        .route("/v1/chat/completions/{request_id}/stream", get(stream_async_completion))
+        .route("/v1/chat/completions/{request_id}", axum::routing::delete(cancel_async_request))
         .route("/ingestion/reindex", post(ingestion_reindex))
         .route("/ingestion/status", get(ingestion_status))
         .route("/images/{name}", get(serve_image))
@@ -53,6 +62,19 @@ pub async fn run_server(state: Arc<AppState>) -> anyhow::Result<()> {
     let host = state.config.server.host.clone();
     let port = state.config.server.port;
     let addr: SocketAddr = format!("{}:{}", host, port).parse()?;
+
+    // Start async queue worker if enabled
+    if state.config.r#async.enabled {
+        let worker = Arc::new(crate::async_queue::worker::AsyncQueueWorker::new(
+            state.db_pool.clone(),
+            state.clone(),
+            state.config.r#async.max_concurrent,
+            state.config.r#async.cleanup_interval_minutes,
+            state.config.r#async.cache_ttl_hours,
+        ));
+        worker.clone().run().await;
+        tracing::info!("Async queue worker started");
+    }
 
     let app = build_router(state);
     let listener = tokio::net::TcpListener::bind(&addr).await?;

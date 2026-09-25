@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use reqwest::Client;
+use sqlx::SqlitePool;
 use crate::config::AppConfig;
 use crate::comfy_ui::ComfyUIManager;
 use crate::context::{ContextManager, FastTokenizer};
@@ -23,6 +24,7 @@ use crate::router::IntentClassifier;
 pub struct AppState {
     pub config: AppConfig,
     pub http_client: Client,
+    pub db_pool: SqlitePool,
     pub context_mgr: Arc<ContextManager>,
     pub rag_engine: Arc<RagEngine>,
     pub search_service: Arc<SearchService>,
@@ -46,6 +48,15 @@ impl AppState {
         let http_client = Client::builder()
             .timeout(std::time::Duration::from_secs(config.upstream.timeout_seconds))
             .build()?;
+
+        // Initialize SQLite pool for async request queue
+        let db_pool = SqlitePool::connect(&format!("sqlite:{}?mode=rwc", config.db.path)).await?;
+        
+        // Run schema migrations
+        sqlx::query(crate::db::schema::INIT_SQL).execute(&db_pool).await?;
+        sqlx::query(&crate::db::schema::init_vec_table_sql(config.embeddings.dimension))
+            .execute(&db_pool)
+            .await?;
 
         let tokenizer = Arc::new(FastTokenizer::new::<&str>(None));
 
@@ -194,6 +205,7 @@ impl AppState {
         Ok(Self {
             config,
             http_client,
+            db_pool,
             context_mgr,
             rag_engine,
             search_service,

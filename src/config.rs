@@ -27,6 +27,8 @@ pub struct AppConfig {
     pub file_generation: FileGenerationConfig,
     #[serde(default)]
     pub tool_commands: ToolCommandsConfig,
+    #[serde(default)]
+    pub r#async: AsyncConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -467,6 +469,33 @@ fn default_max_history() -> usize {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct AsyncConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_async_cache_ttl_hours")]
+    pub cache_ttl_hours: u64,
+    #[serde(default = "default_async_max_concurrent")]
+    pub max_concurrent: usize,
+    #[serde(default = "default_async_cleanup_interval_minutes")]
+    pub cleanup_interval_minutes: u64,
+}
+
+impl Default for AsyncConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            cache_ttl_hours: 1,
+            max_concurrent: 1,
+            cleanup_interval_minutes: 5,
+        }
+    }
+}
+
+fn default_async_cache_ttl_hours() -> u64 { 1 }
+fn default_async_max_concurrent() -> usize { 1 }
+fn default_async_cleanup_interval_minutes() -> u64 { 5 }
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct IntentConfig {
     #[serde(default)]
     pub categories: IntentCategories,
@@ -707,6 +736,7 @@ impl Default for AppConfig {
             image_generation: ImageGenerationConfig::default(),
             file_generation: FileGenerationConfig::default(),
             tool_commands: ToolCommandsConfig::default(),
+            r#async: AsyncConfig::default(),
         }
     }
 }
