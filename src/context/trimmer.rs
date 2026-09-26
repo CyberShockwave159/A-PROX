@@ -12,6 +12,15 @@ pub struct ChatMessage {
     pub tool_calls: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// Marks a message as part of an interactive roleplay session.
+    ///
+    /// Set by clients (e.g. the CLAN Flutter app) on every message of a roleplay
+    /// turn. When any message in a request carries it, the router restricts the
+    /// armed tool set to [`ROLEPLAY_ALLOWED_TOOLS`] so a roleplay turn can never
+    /// reach `web_search`, `web_fetch`, `system_time` or `write_file` — see
+    /// `router::restrict_tools_for_roleplay`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roleplay: Option<bool>,
 }
 
 impl ChatMessage {
@@ -221,6 +230,7 @@ pub fn inject_system_instructions(messages: &mut Vec<ChatMessage>, prompt: &str)
             name: None,
             tool_calls: None,
             tool_call_id: None,
+            roleplay: None,
         });
     }
 }

@@ -22,7 +22,11 @@ use tower_http::trace::TraceLayer;
 pub const MAX_REQUEST_BODY_BYTES: usize = 100 * 1024 * 1024;
 
 use crate::state::AppState;
-use routes::{chat_completions, health_check, ingestion_reindex, ingestion_status, list_models, monitor_api, monitor_dashboard, monitor_sse, monitor_statistics, serve_file, serve_image};
+use routes::{
+    chat_completions, health_check, ingestion_reindex, ingestion_status, list_models,
+    monitor_api, monitor_dashboard, monitor_sse, monitor_statistics, rag_collection_count,
+    rag_ingest, rag_query, serve_file, serve_image,
+};
 
 pub fn build_router(state: Arc<AppState>) -> Router {
     let cors = CorsLayer::new()
@@ -41,6 +45,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/chat/completions", post(chat_completions))
         .route("/ingestion/reindex", post(ingestion_reindex))
         .route("/ingestion/status", get(ingestion_status))
+        // Direct RAG store access (no LLM round-trip) — see routes.rs.
+        .route("/rag/ingest", post(rag_ingest))
+        .route("/rag/query", post(rag_query))
+        .route("/rag/collections/{name}/count", get(rag_collection_count))
         .route("/images/{name}", get(serve_image))
         .route("/files/{name}", get(serve_file))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))

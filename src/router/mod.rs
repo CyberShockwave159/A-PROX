@@ -28,7 +28,79 @@ enum RouteIntent {
     None,
 }
 
+/// Model names that select a *routing strategy* rather than naming an actual
+/// upstream model. They are stripped from the payload before it is forwarded
+/// (see [`restore_upstream_model`]) so they never reach llama.cpp or a strict
+/// OpenAI-compatible backend.
+pub const ROUTING_MODEL_ALIASES: &[&str] = &[
+    "a-prox-direct",
+    "a-prox-pass",
+    "a-prox-fast",
+    "a-prox-rag",
+    "a-prox-knowledge",
+    "a-prox-docs",
+    "a-prox-agent",
+    "a-prox-tools",
+];
+
+/// True when `name` is one of A-PROX's routing aliases rather than a real model.
+pub fn is_routing_alias(name: &str) -> bool {
+    let name = name.trim().to_lowercase();
+    ROUTING_MODEL_ALIASES.iter().any(|a| *a == name)
+}
+
+/// Replaces a routing alias in `payload["model"]` with the configured upstream
+/// model alias.
+///
+/// Without this, a client that targets a route with `model: "a-prox-rag"` has
+/// that alias forwarded verbatim to the upstream server, which either ignores it
+/// (llama.cpp) or rejects the request (strict OpenAI backends).
+pub fn restore_upstream_model(payload: &mut Value, upstream_model_alias: &str) {
+    if upstream_model_alias.trim().is_empty() {
+        return;
+    }
+    let is_alias = payload
+        .get("model")
+        .and_then(|v| v.as_str())
+        .map(is_routing_alias)
+        .unwrap_or(false);
+    if is_alias {
+        payload["model"] = Value::String(upstream_model_alias.to_string());
+    }
+}
+
 pub struct RequestRouter;
+
+/// The only tools a message marked `"roleplay": true` is allowed to reach.
+///
+/// Roleplay is an immersive conversation: a turn should never break character to
+/// browse the web, read the clock, or write a file. Memory retrieval and image
+/// generation are the two capabilities that *serve* the scene, so they stay.
+pub const ROLEPLAY_ALLOWED_TOOLS: &[&str] = &["rag_search", "rag_ingest", "image_generate"];
+
+/// True when any message in the request is marked as part of a roleplay session.
+pub fn has_roleplay_marker(messages: &[ChatMessage]) -> bool {
+    messages.iter().any(|m| m.roleplay == Some(true))
+}
+
+/// Intersects a tool list with [`ROLEPLAY_ALLOWED_TOOLS`], preserving order.
+///
+/// An empty input means "all internal tools" (the generic `/tools` flag), which
+/// the caller must expand to the concrete registry list *before* calling this.
+/// Returns `None` when the filter would leave nothing armed, so the caller can
+/// decide whether to fall back to the unfiltered set.
+pub fn restrict_tools_for_roleplay(tools: &[String]) -> Option<Vec<String>> {
+    let restricted: Vec<String> = tools
+        .iter()
+        .filter(|t| ROLEPLAY_ALLOWED_TOOLS.contains(&t.as_str()))
+        .cloned()
+        .collect();
+    if restricted.is_empty() {
+        None
+    } else {
+        Some(restricted)
+    }
+}
 
 impl RequestRouter {
     /// Evaluates incoming payload to classify request execution strategy.
@@ -89,6 +161,38 @@ impl RequestRouter {
             // Per-tool slash-command flags: force the agentic loop with the
             // flagged tool armed (explicit user intent beats keyword detection).
             if let Some((tools, query)) = Self::match_tool_command(&content, cmds) {
+                // A roleplay turn may only reach the allow-listed tools. If the
+                // flag named nothing permitted (`/search`, `/fetch`, `/time`,
+                // `/file`), fall through to a plain pass-through rather than
+                // arming the tool: an empty `tools` list means "all internal
+                // tools", which is exactly what the roleplay marker forbids.
+                if has_roleplay_marker(messages) {
+                    // The generic `/tools` flag with no names means "all internal
+                    // tools"; under a roleplay marker that becomes the allow-list.
+                    let requested = if tools.is_empty() {
+                        ROLEPLAY_ALLOWED_TOOLS
+                            .iter()
+                            .map(|s| s.to_string())
+                            .collect::<Vec<_>>()
+                    } else {
+                        tools
+                    };
+                    match restrict_tools_for_roleplay(&requested) {
+                        Some(allowed) => {
+                            return RouteDecision::AgenticToolForced {
+                                tools: allowed,
+                                query,
+                            }
+                        }
+                        None => {
+                            tracing::info!(
+                                "Roleplay request: flag requested {:?}, which is outside the roleplay allow-list; passing through without tools",
+                                requested
+                            );
+                            return RouteDecision::FastPassThrough;
+                        }
+                    }
+                }
                 return RouteDecision::AgenticToolForced { tools, query };
             }
 

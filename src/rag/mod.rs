@@ -28,12 +28,26 @@ impl RagEngine {
     }
 
     /// Ingests a raw text document: splits into chunks, computes embeddings, and stores in SQLite
+    ///
+    /// Idempotent by `source_uri`: any chunks previously stored for the same
+    /// `(collection, source_uri)` are removed first, so re-ingesting a rewritten
+    /// document replaces it instead of accumulating duplicates.
     pub fn ingest_document(
         &self,
         collection: &str,
         source_uri: &str,
         content: &str,
     ) -> anyhow::Result<usize> {
+        let removed = self.vector_store.delete_document(collection, source_uri)?;
+        if removed > 0 {
+            tracing::info!(
+                "Replacing {} existing chunk(s) for source {:?} (collection: {})",
+                removed,
+                source_uri,
+                collection
+            );
+        }
+
         let chunks = self.chunker.chunk_text(content);
         let total_chunks = chunks.len();
 

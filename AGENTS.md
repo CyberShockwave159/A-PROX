@@ -58,6 +58,22 @@ Priority order in `classify_request`:
 7. Non-empty client-supplied `tools` array → AgenticToolLoop.
 8. Default → FastPassThrough.
 
+### `image_only` short-circuit
+`image_only: true` on a request returns `delta.image_url` + `finish_reason` +
+`[DONE]` as soon as `image_generate` succeeds, skipping the next loop iteration and all of Phase C (the vision caption turn and the non-streaming synthesis fallback). A-PROX emits the artifact event itself, so neither turn is needed for the image to reach the client. Gated on `image_ctx.result.is_some()` — a failed generation falls through so the model can report the error. Opt-in, because conversational callers want the caption.
+
+**Wire contract to preserve:** in this mode the `delta.image_url` event is the *only* event in the response. A client that filters the stream down to text and reasoning chunks must still pass artifact-only chunks through, or the image is silently lost while the server has generated and served it. This is not hypothetical — the CLAN client's `SseClient.filterReasoning` did exactly that and reported "the server returned no image" for a request that had produced a valid PNG. Also note `/image` withholds all response headers until the diffusion job finishes (~195s measured: llama.cpp stop → ComfyUI cold start → 20-step render → llama.cpp restart), so clients need a response-header budget well above the usual one. `: keepalive` comments every 2s keep the socket warm but do not shorten the job.
+
+### Roleplay tool restriction
+Any message tagged `"roleplay": true` (`ChatMessage.roleplay`, set by clients such as the CLAN Flutter app) restricts the armed tool set to `ROLEPLAY_ALLOWED_TOOLS` = `rag_search`, `rag_ingest`, `image_generate`. Enforced in two places:
+- `restrict_tools_for_roleplay` narrows an `AgenticToolForced` tool list. An empty result (e.g. `/search`, which arms `web_search`) downgrades to `FastPassThrough` — an empty list is how the generic `/tools` flag means "all internal tools", so it must never be passed through. A bare `/tools` with no names under the marker arms exactly the allow-list.
+- `filter_armed_tools_for_roleplay` filters the serialized `payload["tools"]` schemas inside `execute_agentic_loop`, applied *after* every arming path (forced flag, client-supplied, all-internal, image/file pipeline), so it is the single choke point.
+
+`RAGAugmented` / `RAGIngestion` / `FastPassThrough` arm no tools and are unaffected.
+
+### Routing aliases are not model names
+`ROUTING_MODEL_ALIASES` (`a-prox-rag`, `a-prox-agent`, …) select a *strategy*. `restore_upstream_model` rewrites them to `config.upstream.model_alias` before anything is forwarded — without it a client's alias leaks to llama.cpp (ignored) or to a strict OpenAI backend (rejected). Keep this list in sync with the if-chain in `classify_request`; a unit test asserts they cover every routed name.
+
 ## Commands
 ```bash
 # Download dependencies (ONNX model + SearXNG)
@@ -88,7 +104,9 @@ Notable defaults from `config/default.toml`:
 - `pdf_enabled = true` — PDFs sent upstream to multimodal endpoint
 - `db.mmap_size_mb = 16384` — SQLite memory-map uses ~16 GB RAM
 - `guardrails.enable_agentic_tools = true` (false disables agentic routing)
+- `guardrails.max_generation_tokens = 4096` — per-turn `max_tokens` for the agentic loop, applied only when the client didn't set one (`0` = omit, restoring llama.cpp's 2048 cap). The image pipeline needs headroom: Phase A plans a prompt before calling `image_generate`, and truncation there yields a silent no-image failure. See `apply_generation_budget`.
 - `file_generation.enabled = true` — exposes the `write_file` tool on detected file requests (see File Write section)
+- `image_generation.styles` — named visual styles (`anime`, `semi-realistic`, `photo-realistic`, `default`) selected per request with the `image_style` field. Applied in `WorkflowTemplate::apply`, i.e. *after* the prompt enhancer rewrote the prompt, so a rewriter cannot dilute the style. A style's `negative_prompt` **replaces** `image_generation.default_negative_prompt` (which is realism-leaning and fights non-photographic styles).
 - `[tool_commands]` — per-tool `/flag` strings (defaults: `/tools`, `/search`, `/fetch`, `/ragsearch`, `/ingest`, `/time`, `/image`, `/file`) **plus** routing-only commands (`/bypass`, `/direct`, `/pass`, `/rag`, `/knowledge`, `/docs`); a leading configured flag forces `AgenticToolForced`, an empty string disables the flag. `/tools` arms an exact subset with leading tool-name args.
 
 (Note: the `[context]` sample values in `README.md` — 32768/4096/10 — are stale; the committed `default.toml` uses 65536/8192/7.)
@@ -105,11 +123,14 @@ All routes in `src/server/mod.rs`; auth column reflects the *current* code (see 
 | `/v1/chat/completions` | POST | **None enforced** | Main chat endpoint (incl. image generation) |
 | `/ingestion/reindex` | POST | **None enforced** | Force full directory re-index |
 | `/ingestion/status` | GET | **None enforced** | Get indexing stats |
+| `/rag/ingest` | POST | **None enforced** | Chunk + embed + store a document (no LLM round-trip) |
+| `/rag/query` | POST | **None enforced** | Hybrid-search the store; `collection`/`top_k`/`min_score` filters |
+| `/rag/collections/{name}/count` | GET | **None enforced** | Chunks in a collection (lets a client detect an empty one) |
 | `/images/{name}` | GET | None | Serve stored generated PNGs |
 | `/files/{name}` | GET | None | Serve stored generated text files |
 
 ## Key files
-- `src/server/routes.rs` — main request handling, agentic loop (`execute_agentic_loop`), image-gen pipeline (Phase A/B/C helpers: `prepare_image_request`, `maybe_execute_image_generate`, `inject_generated_image_as_user_msg`, `image_url_sse_payload`), file-write pipeline (`prepare_file_request`, `maybe_execute_write_file`, `dispatch_tool_execution`, `sanitize_tool_calls_for_history`, `file_url_sse_payload`, `resolve_file_public_url`), artifact URL resolution (`artifact_base_url`, `file_served_url`, `file_data_url`), monitor handlers
+- `src/server/routes.rs` — main request handling, agentic loop (`execute_agentic_loop`), direct RAG store endpoints (`rag_ingest`, `rag_query`, `rag_collection_count`, `RagOptions`), roleplay tool filter (`filter_armed_tools_for_roleplay`), image-gen pipeline (Phase A/B/C helpers: `prepare_image_request`, `maybe_execute_image_generate`, `inject_generated_image_as_user_msg`, `image_url_sse_payload`), file-write pipeline (`prepare_file_request`, `maybe_execute_write_file`, `dispatch_tool_execution`, `sanitize_tool_calls_for_history`, `file_url_sse_payload`, `resolve_file_public_url`), artifact URL resolution (`artifact_base_url`, `file_served_url`, `file_data_url`), monitor handlers
 - `src/imagegen/` — `orchestrator.rs` (ImageGenService: ComfyUI submit/poll/fetch + llama lifecycle), `ratio.rs` (WxH math), `mod.rs` (intent keywords, prompt loading, bare-JSON parse)
 - `src/filegen/mod.rs` — write_file detection (`is_file_request`, keyword + verb/cue signals), `FILE_DIRECTIVE`, `clean_filename`, `is_denied_extension`, bare-JSON fallback (+ inline tests)
 - `src/files/` — `store.rs` (FileStore on `[file_generation].serve_dir`: save/append/resolve/read, MIME map) + `GeneratedFile`

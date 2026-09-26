@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::Path;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -81,6 +82,21 @@ pub struct GuardrailsConfig {
     pub min_free_ram_gb: f64,
     #[serde(default = "default_enable_agentic_tools")]
     pub enable_agentic_tools: bool,
+    /// Token budget for each agentic-loop turn (the upstream `max_tokens`).
+    ///
+    /// A-PROX does not set `max_tokens` itself, so without this the upstream
+    /// server's own default applies — llama.cpp caps at 2048. That is fine for a
+    /// turn that calls a tool immediately, but an image turn first has to
+    /// *plan* (Phase A rewrites the prompt before calling `image_generate`),
+    /// and a planning model can exceed 2048 — at which point the turn is cut off
+    /// mid-thought, no tool call is emitted, and the request silently produces no
+    /// image.
+    ///
+    /// Set `0` to omit `max_tokens` entirely and keep the upstream default.
+    /// Raise it for models that reason at length; lower it to bound the cost of a
+    /// turn that fails to converge.
+    #[serde(default = "default_max_generation_tokens")]
+    pub max_generation_tokens: u32,
 }
 
 fn default_max_concurrent_inferences() -> usize { 1 }
@@ -88,6 +104,7 @@ fn default_queue_depth() -> usize { 16 }
 fn default_rate_limit() -> u32 { 120 }
 fn default_min_free_ram_gb() -> f64 { 16.0 }
 fn default_enable_agentic_tools() -> bool { true }
+fn default_max_generation_tokens() -> u32 { 4096 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ContextConfig {
@@ -292,6 +309,37 @@ pub struct ImageGenerationConfig {
     pub generation_timeout_s: u64,
     #[serde(default = "default_poll_interval_ms")]
     pub poll_interval_ms: u64,
+    /// Named visual styles selectable per request via the `image_style` field.
+    ///
+    /// A style is applied *after* the prompt enhancer has rewritten the prompt,
+    /// so it cannot be diluted by the model. Each entry contributes a
+    /// `prompt_suffix` appended to the final prompt and a `negative_prompt`
+    /// that **replaces** `default_negative_prompt` (which is realism-leaning and
+    /// actively fights non-photographic styles).
+    #[serde(default)]
+    pub styles: HashMap<String, ImageStyleConfig>,
+}
+
+/// A named visual style: what to append to the final prompt, and what to avoid.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ImageStyleConfig {
+    /// Appended verbatim to the prompt handed to the sampler.
+    #[serde(default)]
+    pub prompt_suffix: String,
+    /// Replaces `image_generation.default_negative_prompt` for this style.
+    #[serde(default)]
+    pub negative_prompt: String,
+}
+
+impl ImageStyleConfig {
+    /// Neutral fallback: neither adds a style phrase nor suppresses anything,
+    /// so an unknown or absent `image_style` behaves exactly as before.
+    pub fn neutral() -> Self {
+        Self {
+            prompt_suffix: String::new(),
+            negative_prompt: String::new(),
+        }
+    }
 }
 
 impl Default for ImageGenerationConfig {
@@ -314,8 +362,56 @@ impl Default for ImageGenerationConfig {
             inline_data_url: false,
             generation_timeout_s: 180,
             poll_interval_ms: 2000,
+            styles: default_image_styles(),
         }
     }
+}
+
+/// The built-in style palette. `default` is the neutral fallback used when a
+/// request omits `image_style` or names one that isn't configured.
+fn default_image_styles() -> HashMap<String, ImageStyleConfig> {
+    let mut styles = HashMap::new();
+    styles.insert(
+        "default".to_string(),
+        ImageStyleConfig {
+            prompt_suffix: String::new(),
+            negative_prompt: String::new(),
+        },
+    );
+    styles.insert(
+        "anime".to_string(),
+        ImageStyleConfig {
+            prompt_suffix:
+                "anime key visual, cel-shaded, clean line art, flat colour blocking, expressive eyes"
+                    .to_string(),
+            negative_prompt:
+                "photorealistic, realistic skin pores, 3d render, cgi, photographic, airbrushed, soft gradients"
+                    .to_string(),
+        },
+    );
+    styles.insert(
+        "semi-realistic".to_string(),
+        ImageStyleConfig {
+            prompt_suffix:
+                "semi-realistic digital illustration, soft painterly shading, subsurface skin scattering, detailed fabric texture"
+                    .to_string(),
+            negative_prompt:
+                "flat cel shading, chibi, plastic skin, harsh 3d render, fully photographic, anime line art"
+                    .to_string(),
+        },
+    );
+    styles.insert(
+        "photo-realistic".to_string(),
+        ImageStyleConfig {
+            prompt_suffix:
+                "photorealistic photograph, natural skin texture, shallow depth of field, physically accurate lighting, 35mm lens"
+                    .to_string(),
+            negative_prompt:
+                "illustration, anime, cel-shaded, painting, cgi, 3d render, plastic skin, oversaturated"
+                    .to_string(),
+        },
+    );
+    styles
 }
 
 fn default_llama_host() -> String { "127.0.0.1".to_string() }
@@ -653,6 +749,7 @@ impl Default for AppConfig {
                 rate_limit_per_minute: 120,
                 min_free_ram_gb: 16.0,
                 enable_agentic_tools: true,
+                max_generation_tokens: 4096,
             },
             context: ContextConfig {
                 max_context_tokens: 32768,

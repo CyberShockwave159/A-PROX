@@ -5,7 +5,7 @@ use std::time::Instant;
 use serde_json::Value;
 
 use crate::comfy_ui::{ComfyUIManager, WorkflowKind, WorkflowParams, WorkflowTemplate};
-use crate::config::{ComfyUiConfig, ImageGenerationConfig, LlamaServerConfig};
+use crate::config::{ComfyUiConfig, ImageGenerationConfig, ImageStyleConfig, LlamaServerConfig};
 use crate::images::ImageStore;
 use crate::llama_server::LlamaServerManager;
 use crate::imagegen::ratio::compute_dimensions;
@@ -54,6 +54,10 @@ pub struct GenerateRequest {
     pub reference_dims: Option<(u32, u32)>,
     /// The attached image bytes (uploaded to ComfyUI for i2i), if any.
     pub reference_image: Option<Vec<u8>>,
+    /// Key into `image_generation.styles`, selecting a visual style that is
+    /// applied to the final prompt and negative prompt. Unknown or absent keys
+    /// fall back to the neutral `default` style.
+    pub style: Option<String>,
     /// Externally-addressable base URL for the served PNG, resolved per request
     /// (config `public_base_url` → forwarded headers → `Host` → loopback). Empty
     /// → fall back to the service's configured base.
@@ -106,8 +110,30 @@ impl ImageGenService {
         }
     }
 
-    pub async fn generate(&self, req: GenerateRequest) -> anyhow::Result<GeneratedImage> {
-        if !self.img_cfg.enabled {
+    /// Looks up a configured visual style by key.
+    ///
+    /// Falls back to the neutral `default` style for an unknown or absent key so
+    /// a client can name a style this build doesn't know about without breaking
+    /// generation.
+    pub fn resolve_style(&self, key: Option<&str>) -> ImageStyleConfig {
+        let key = key.map(str::trim).filter(|k| !k.is_empty());
+        if let Some(k) = key {
+            if let Some(style) = self.img_cfg.styles.get(k) {
+                return style.clone();
+            }
+            tracing::warn!(
+                "Unknown image_style {:?}; falling back to the default style",
+                k
+            );
+        }
+        self.img_cfg
+            .styles
+            .get("default")
+            .cloned()
+            .unwrap_or_else(ImageStyleConfig::neutral)
+    }
+
+    pub async fn generate(&self, req: GenerateRequest) -> anyhow::Result<GeneratedImage> {        if !self.img_cfg.enabled {
             anyhow::bail!("image generation is disabled ([image_generation] enabled = false)");
         }
 
@@ -162,9 +188,23 @@ impl ImageGenService {
                 _ => None,
             };
 
+            // Resolve the requested visual style. This happens here, at the last
+            // moment before the graph is built, so the style is applied *after*
+            // the prompt enhancer rewrote the prompt and cannot be diluted by it.
+            let style = self.resolve_style(req.style.as_deref());
+            let mut final_prompt = req.prompt.clone();
+            if !style.prompt_suffix.trim().is_empty() {
+                final_prompt = format!("{}, {}", final_prompt.trim(), style.prompt_suffix.trim());
+            }
+            let final_negative = if style.negative_prompt.trim().is_empty() {
+                req.negative_prompt.clone()
+            } else {
+                style.negative_prompt.trim().to_string()
+            };
+
             let params = WorkflowParams {
-                prompt: req.prompt.clone(),
-                negative_prompt: req.negative_prompt.clone(),
+                prompt: final_prompt,
+                negative_prompt: final_negative,
                 seed: random_seed(),
                 width: w,
                 height: h,

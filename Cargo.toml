@@ -1,6 +1,6 @@
 [package]
 name = "a-prox"
-version = "1.2.1"
+version = "1.9.0"
 edition = "2021"
 authors = ["A-PROX Team"]
 description = "High-performance, hardware-optimized API middleware proxy for llama.cpp"

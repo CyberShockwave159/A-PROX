@@ -7,6 +7,7 @@ fn sys_msg(text: &str) -> ChatMessage {
         name: None,
         tool_calls: None,
         tool_call_id: None,
+        roleplay: None,
     }
 }
 
@@ -17,6 +18,7 @@ fn user_msg(text: &str) -> ChatMessage {
         name: None,
         tool_calls: None,
         tool_call_id: None,
+        roleplay: None,
     }
 }
 
@@ -31,6 +33,7 @@ fn user_msg_with_image(text: &str, data_url: &str) -> ChatMessage {
         name: None,
         tool_calls: None,
         tool_call_id: None,
+        roleplay: None,
     }
 }
 

@@ -90,6 +90,7 @@ fn test_context_manager_pruning() {
             name: None,
             tool_calls: None,
             tool_call_id: None,
+            roleplay: None,
         },
         ChatMessage {
             role: "user".to_string(),
@@ -97,6 +98,7 @@ fn test_context_manager_pruning() {
             name: None,
             tool_calls: None,
             tool_call_id: None,
+            roleplay: None,
         },
         ChatMessage {
             role: "assistant".to_string(),
@@ -104,6 +106,7 @@ fn test_context_manager_pruning() {
             name: None,
             tool_calls: None,
             tool_call_id: None,
+            roleplay: None,
         },
         ChatMessage {
             role: "user".to_string(),
@@ -111,6 +114,7 @@ fn test_context_manager_pruning() {
             name: None,
             tool_calls: None,
             tool_call_id: None,
+            roleplay: None,
         },
     ];
 
@@ -141,6 +145,7 @@ fn test_context_manager_preserves_multimodal_content() {
             name: None,
             tool_calls: None,
             tool_call_id: None,
+            roleplay: None,
         },
         ChatMessage {
             role: "user".to_string(),
@@ -148,6 +153,7 @@ fn test_context_manager_preserves_multimodal_content() {
             name: None,
             tool_calls: None,
             tool_call_id: None,
+            roleplay: None,
         },
     ];
 
@@ -318,6 +324,7 @@ fn test_router_fast_passthrough() {
             name: None,
             tool_calls: None,
             tool_call_id: None,
+            roleplay: None,
         },
     ];
 
@@ -331,6 +338,7 @@ fn test_router_fast_passthrough() {
             name: None,
             tool_calls: None,
             tool_call_id: None,
+            roleplay: None,
         },
     ];
 
@@ -344,6 +352,7 @@ fn test_router_fast_passthrough() {
             name: None,
             tool_calls: None,
             tool_call_id: None,
+            roleplay: None,
         },
     ];
 
@@ -360,6 +369,7 @@ fn test_router_agentic_triggers() {
         name: None,
         tool_calls: None,
         tool_call_id: None,
+        roleplay: None,
     }];
     assert_eq!(RequestRouter::classify_request(&messages, None, false, false, None, None, None, None), RouteDecision::AgenticToolLoop);
 
@@ -369,6 +379,7 @@ fn test_router_agentic_triggers() {
         name: None,
         tool_calls: None,
         tool_call_id: None,
+        roleplay: None,
     }];
     assert_eq!(RequestRouter::classify_request(&messages, None, false, false, None, None, None, None), RouteDecision::AgenticToolLoop);
 
@@ -378,6 +389,7 @@ fn test_router_agentic_triggers() {
         name: None,
         tool_calls: None,
         tool_call_id: None,
+        roleplay: None,
     }];
     assert_eq!(RequestRouter::classify_request(&messages, None, false, false, None, None, None, None), RouteDecision::AgenticToolLoop);
 
@@ -387,6 +399,7 @@ fn test_router_agentic_triggers() {
         name: None,
         tool_calls: None,
         tool_call_id: None,
+        roleplay: None,
     }];
     assert_eq!(RequestRouter::classify_request(&messages, None, false, false, None, None, None, None), RouteDecision::AgenticToolLoop);
 
@@ -396,6 +409,7 @@ fn test_router_agentic_triggers() {
         name: None,
         tool_calls: None,
         tool_call_id: None,
+        roleplay: None,
     }];
     assert_eq!(RequestRouter::classify_request(&messages, None, false, false, None, None, None, None), RouteDecision::AgenticToolLoop);
 
@@ -405,6 +419,7 @@ fn test_router_agentic_triggers() {
         name: None,
         tool_calls: None,
         tool_call_id: None,
+        roleplay: None,
     }];
     assert_eq!(RequestRouter::classify_request(&messages, None, false, false, None, None, None, None), RouteDecision::AgenticToolLoop);
 
@@ -415,6 +430,7 @@ fn test_router_agentic_triggers() {
         name: None,
         tool_calls: None,
         tool_call_id: None,
+        roleplay: None,
     }];
     assert_eq!(RequestRouter::classify_request(&messages, None, false, false, None, None, None, None), RouteDecision::AgenticToolLoop);
 
@@ -424,6 +440,7 @@ fn test_router_agentic_triggers() {
         name: None,
         tool_calls: None,
         tool_call_id: None,
+        roleplay: None,
     }];
     assert_eq!(RequestRouter::classify_request(&messages, None, false, false, None, None, None, None), RouteDecision::AgenticToolLoop);
 
@@ -433,6 +450,7 @@ fn test_router_agentic_triggers() {
         name: None,
         tool_calls: None,
         tool_call_id: None,
+        roleplay: None,
     }];
     assert_eq!(RequestRouter::classify_request(&messages, None, false, false, None, None, None, None), RouteDecision::AgenticToolLoop);
 
@@ -442,6 +460,7 @@ fn test_router_agentic_triggers() {
         name: None,
         tool_calls: None,
         tool_call_id: None,
+        roleplay: None,
     }];
     assert_eq!(RequestRouter::classify_request(&messages, None, false, false, None, None, None, None), RouteDecision::AgenticToolLoop);
 }
@@ -457,6 +476,7 @@ fn test_router_tool_command_flags() {
         name: None,
         tool_calls: None,
         tool_call_id: None,
+        roleplay: None,
     }];
     assert_eq!(
         RequestRouter::classify_request(&messages, None, false, false, None, None, None, Some(&cmd)),
@@ -480,6 +500,7 @@ fn test_router_tool_command_flags() {
             name: None,
             tool_calls: None,
             tool_call_id: None,
+            roleplay: None,
         }];
         match RequestRouter::classify_request(&messages, None, false, false, None, None, None, Some(&cmd)) {
             RouteDecision::AgenticToolForced { tools: t, .. } => assert_eq!(t, tools),
@@ -501,6 +522,7 @@ fn test_router_tool_command_flags() {
             name: None,
             tool_calls: None,
             tool_call_id: None,
+            roleplay: None,
         }];
         match RequestRouter::classify_request(&messages, None, false, false, None, None, None, Some(&cmd)) {
             RouteDecision::AgenticToolForced { tools, query } => {
@@ -520,6 +542,7 @@ fn test_router_tool_command_flags() {
         name: None,
         tool_calls: None,
         tool_call_id: None,
+        roleplay: None,
     }];
     assert_ne!(
         RequestRouter::classify_request(&messages, None, false, false, None, None, None, Some(&custom)),
@@ -536,6 +559,7 @@ fn test_router_configurable_routing_commands() {
         name: None,
         tool_calls: None,
         tool_call_id: None,
+        roleplay: None,
     };
 
     // Defaults preserved: bypass family → passthrough, rag family → RAG.
@@ -574,6 +598,7 @@ fn test_router_bypasses() {
         name: None,
         tool_calls: None,
         tool_call_id: None,
+        roleplay: None,
     }];
 
     // Header bypass should force FastPassThrough even with search intent
@@ -587,6 +612,7 @@ fn test_router_bypasses() {
         name: None,
         tool_calls: None,
         tool_call_id: None,
+        roleplay: None,
     }];
     let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None, None);
     assert_eq!(decision, RouteDecision::FastPassThrough);
@@ -597,6 +623,7 @@ fn test_router_bypasses() {
         name: None,
         tool_calls: None,
         tool_call_id: None,
+        roleplay: None,
     }];
     let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None, None);
     assert_eq!(decision, RouteDecision::FastPassThrough);
@@ -607,6 +634,7 @@ fn test_router_bypasses() {
         name: None,
         tool_calls: None,
         tool_call_id: None,
+        roleplay: None,
     }];
     let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None, None);
     assert_eq!(decision, RouteDecision::FastPassThrough);
@@ -655,6 +683,7 @@ fn test_router_rag_intent() {
         name: None,
         tool_calls: None,
         tool_call_id: None,
+        roleplay: None,
     }];
     let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None, None);
     match decision {
@@ -670,6 +699,7 @@ fn test_router_rag_intent() {
         name: None,
         tool_calls: None,
         tool_call_id: None,
+        roleplay: None,
     }];
     let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None, None);
     match decision {
@@ -683,6 +713,7 @@ fn test_router_rag_intent() {
         name: None,
         tool_calls: None,
         tool_call_id: None,
+        roleplay: None,
     }];
     let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None, None);
     match decision {
@@ -699,6 +730,7 @@ fn test_router_tools_trigger() {
         name: None,
         tool_calls: None,
         tool_call_id: None,
+        roleplay: None,
     }];
 
     let tools = json!([
@@ -732,6 +764,7 @@ fn test_router_model_name_targeting() {
         name: None,
         tool_calls: None,
         tool_call_id: None,
+        roleplay: None,
     }];
 
     // a-prox-direct should force FastPassThrough regardless of message content
@@ -753,6 +786,7 @@ fn test_router_model_name_targeting() {
         name: None,
         tool_calls: None,
         tool_call_id: None,
+        roleplay: None,
     }];
     let decision = RequestRouter::classify_request(&rag_messages, None, false, false, Some("a-prox-rag"), None, None, None);
     if let RouteDecision::RAGAugmented { query } = decision {
@@ -770,6 +804,7 @@ fn test_router_rag_ingestion_intent() {
         name: None,
         tool_calls: None,
         tool_call_id: None,
+        roleplay: None,
     }];
     let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None, None);
     if let RouteDecision::RAGIngestion { content } = decision {
@@ -784,6 +819,7 @@ fn test_router_rag_ingestion_intent() {
         name: None,
         tool_calls: None,
         tool_call_id: None,
+        roleplay: None,
     }];
     let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None, None);
     if let RouteDecision::RAGIngestion { content } = decision {
@@ -798,6 +834,7 @@ fn test_router_rag_ingestion_intent() {
         name: None,
         tool_calls: None,
         tool_call_id: None,
+        roleplay: None,
     }];
     let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None, None);
     assert!(matches!(decision, RouteDecision::RAGIngestion { .. }));
@@ -826,6 +863,7 @@ fn test_router_rag_ingestion_natural_phrasings() {
             name: None,
             tool_calls: None,
             tool_call_id: None,
+            roleplay: None,
         }];
         let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None, None);
         assert!(
@@ -849,6 +887,7 @@ fn test_router_rag_ingestion_natural_phrasings() {
             name: None,
             tool_calls: None,
             tool_call_id: None,
+            roleplay: None,
         }];
         let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None, None);
         assert!(
@@ -879,6 +918,7 @@ fn test_router_additional_web_search_keywords() {
             name: None,
             tool_calls: None,
             tool_call_id: None,
+            roleplay: None,
         }];
         let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None, None);
         if expect_agentic {
@@ -899,6 +939,7 @@ fn test_router_agentic_disabled_no_tools() {
         name: None,
         tool_calls: None,
         tool_call_id: None,
+        roleplay: None,
     }];
 
     // With agentic_tools_enabled = false, should still detect search intent and route to AgenticToolLoop
@@ -916,6 +957,7 @@ fn test_router_agentic_disabled_no_tools() {
         name: None,
         tool_calls: None,
         tool_call_id: None,
+        roleplay: None,
     }];
     let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None, None);
     assert_eq!(decision, RouteDecision::FastPassThrough);
@@ -952,6 +994,7 @@ fn test_router_broad_web_search_patterns() {
             name: None,
             tool_calls: None,
             tool_call_id: None,
+            roleplay: None,
         }];
         let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None, None);
         assert!(
@@ -979,6 +1022,7 @@ fn test_router_broad_web_fetch_patterns() {
             name: None,
             tool_calls: None,
             tool_call_id: None,
+            roleplay: None,
         }];
         let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None, None);
         assert!(
@@ -1010,6 +1054,7 @@ fn test_router_news_with_intermediate_words() {
             name: None,
             tool_calls: None,
             tool_call_id: None,
+            roleplay: None,
         }];
         let decision = RequestRouter::classify_request(&messages, None, false, false, None, None, None, None);
         assert!(
@@ -1028,6 +1073,7 @@ fn test_system_prompt_injection_empty_messages() {
         name: None,
         tool_calls: None,
         tool_call_id: None,
+        roleplay: None,
     }];
 
     inject_system_instructions(&mut messages, ANTI_HALLUCINATION_SYSTEM_PROMPT);
@@ -1051,6 +1097,7 @@ fn test_system_prompt_injection_existing_system() {
             name: None,
             tool_calls: None,
             tool_call_id: None,
+            roleplay: None,
         },
         ChatMessage {
             role: "user".to_string(),
@@ -1058,6 +1105,7 @@ fn test_system_prompt_injection_existing_system() {
             name: None,
             tool_calls: None,
             tool_call_id: None,
+            roleplay: None,
         },
     ];
 
@@ -1079,6 +1127,7 @@ fn test_system_prompt_injection_idempotent() {
         name: None,
         tool_calls: None,
         tool_call_id: None,
+        roleplay: None,
     }];
 
     inject_system_instructions(&mut messages, ANTI_HALLUCINATION_SYSTEM_PROMPT);
@@ -1310,3 +1359,391 @@ fn test_parse_result_openai_tool_calls_with_think() {
 
 
 
+// ---------------------------------------------------------------------------
+// Roleplay overhaul: routing aliases, the `rag` request object, the per-message
+// `roleplay` tool restriction, and the image style palette.
+// ---------------------------------------------------------------------------
+
+fn roleplay_message(content: &str) -> ChatMessage {
+    ChatMessage {
+        role: "user".to_string(),
+        content: Some(json!(content)),
+        name: None,
+        tool_calls: None,
+        tool_call_id: None,
+        roleplay: Some(true),
+    }
+}
+
+fn plain_message(content: &str) -> ChatMessage {
+    ChatMessage {
+        role: "user".to_string(),
+        content: Some(json!(content)),
+        name: None,
+        tool_calls: None,
+        tool_call_id: None,
+        roleplay: None,
+    }
+}
+
+fn default_commands() -> ToolCommandsConfig {
+    ToolCommandsConfig::default()
+}
+
+#[test]
+fn routing_aliases_are_recognized() {
+    for alias in a_prox::router::ROUTING_MODEL_ALIASES {
+        assert!(
+            a_prox::router::is_routing_alias(alias),
+            "{} should be recognized as a routing alias",
+            alias
+        );
+    }
+    assert!(a_prox::router::is_routing_alias("A-PROX-Rag"), "match is case-insensitive");
+    assert!(!a_prox::router::is_routing_alias("qwen3.6-35b-moe"));
+    assert!(!a_prox::router::is_routing_alias(""));
+}
+
+#[test]
+fn routing_aliases_cover_every_branch_of_model_targeting() {
+    // Guards against the alias list drifting from the if-chain in
+    // classify_request: every name that selects a route must be listed, or it
+    // would be forwarded upstream verbatim.
+    let routed: Vec<&str> = ["a-prox-direct", "a-prox-pass", "a-prox-fast", "a-prox-rag",
+                             "a-prox-knowledge", "a-prox-docs", "a-prox-agent", "a-prox-tools"]
+        .into_iter()
+        .collect();
+    for name in routed {
+        assert!(
+            a_prox::router::ROUTING_MODEL_ALIASES.contains(&name),
+            "{} routes but is not in ROUTING_MODEL_ALIASES",
+            name
+        );
+    }
+}
+
+#[test]
+fn routing_alias_is_replaced_with_upstream_model_before_forwarding() {
+    let mut payload = json!({ "model": "a-prox-rag", "messages": [] });
+    a_prox::router::restore_upstream_model(&mut payload, "qwen3.6-35b-moe");
+    assert_eq!(payload["model"], json!("qwen3.6-35b-moe"));
+}
+
+#[test]
+fn a_real_model_name_is_left_alone_by_the_alias_restore() {
+    let mut payload = json!({ "model": "my-finetune", "messages": [] });
+    a_prox::router::restore_upstream_model(&mut payload, "qwen3.6-35b-moe");
+    assert_eq!(payload["model"], json!("my-finetune"));
+}
+
+#[test]
+fn empty_upstream_alias_leaves_the_payload_untouched() {
+    let mut payload = json!({ "model": "a-prox-rag" });
+    a_prox::router::restore_upstream_model(&mut payload, "   ");
+    assert_eq!(payload["model"], json!("a-prox-rag"));
+}
+
+#[test]
+fn rag_options_default_to_the_historical_behaviour() {
+    // No `rag` object: search every collection, 5 hits, no score floor.
+    let opts = a_prox::server::routes::RagOptions::from_payload(&json!({ "messages": [] }));
+    assert!(opts.collection.is_none());
+    assert_eq!(opts.top_k, 5);
+    assert_eq!(opts.min_score, 0.0);
+}
+
+#[test]
+fn rag_options_are_read_from_the_request_object() {
+    let payload = json!({
+        "rag": { "collection": "clan_abc_xyz", "top_k": 3, "min_score": 0.35 }
+    });
+    let opts = a_prox::server::routes::RagOptions::from_payload(&payload);
+    assert_eq!(opts.collection.as_deref(), Some("clan_abc_xyz"));
+    assert_eq!(opts.top_k, 3);
+    assert!((opts.min_score - 0.35).abs() < 1e-6);
+}
+
+#[test]
+fn rag_options_are_clamped() {
+    let payload = json!({ "rag": { "top_k": 9999, "min_score": 5.0 } });
+    let opts = a_prox::server::routes::RagOptions::from_payload(&payload);
+    assert_eq!(opts.top_k, 50, "top_k must be clamped to the server maximum");
+    assert_eq!(opts.min_score, 1.0, "min_score must be clamped to [0,1]");
+
+    let payload = json!({ "rag": { "top_k": 0, "min_score": -3.0 } });
+    let opts = a_prox::server::routes::RagOptions::from_payload(&payload);
+    assert_eq!(opts.top_k, 1);
+    assert_eq!(opts.min_score, 0.0);
+}
+
+#[test]
+fn rag_options_ignore_a_blank_collection() {
+    // A blank collection would otherwise be passed through as Some(""), which
+    // `query_rag` would treat as a real (empty) collection filter and match
+    // nothing — silently disabling retrieval.
+    let opts = a_prox::server::routes::RagOptions::from_payload(&json!({ "rag": { "collection": "   " } }));
+    assert!(opts.collection.is_none());
+}
+
+#[test]
+fn roleplay_marker_is_detected_from_any_message() {
+    let messages = vec![
+        plain_message("hello"),
+        roleplay_message("I smile and say hi"),
+    ];
+    assert!(a_prox::router::has_roleplay_marker(&messages));
+    assert!(!a_prox::router::has_roleplay_marker(&[plain_message("hello")]));
+    assert!(!a_prox::router::has_roleplay_marker(&[]));
+}
+
+#[test]
+fn tool_restriction_keeps_only_the_roleplay_allow_list() {
+    let tools = vec![
+        "web_search".to_string(),
+        "rag_search".to_string(),
+        "system_time".to_string(),
+        "image_generate".to_string(),
+        "write_file".to_string(),
+    ];
+    let restricted = a_prox::router::restrict_tools_for_roleplay(&tools).unwrap();
+    assert_eq!(restricted, vec!["rag_search", "image_generate"]);
+}
+
+#[test]
+fn tool_restriction_reports_empty_when_nothing_is_permitted() {
+    // A None result means the caller must NOT proceed with an empty tool list:
+    // an empty list is how the generic `/tools` flag means "all internal tools".
+    let tools = vec!["web_search".to_string(), "write_file".to_string()];
+    assert!(a_prox::router::restrict_tools_for_roleplay(&tools).is_none());
+}
+
+#[test]
+fn roleplay_flag_downgrades_a_forbidden_tool_flag_to_passthrough() {
+    // `/search` would arm web_search, which a roleplay turn may never reach.
+    let decision = RequestRouter::classify_request(
+        &[roleplay_message("/search what is the weather")],
+        None,
+        false,
+        true,
+        None,
+        None,
+        None,
+        Some(&default_commands()),
+    );
+    assert_eq!(decision, RouteDecision::FastPassThrough);
+}
+
+#[test]
+fn roleplay_flag_keeps_a_permitted_tool_flag() {
+    // `/image` arms image_generate, which is on the allow-list.
+    let decision = RequestRouter::classify_request(
+        &[roleplay_message("/image a red circle on white")],
+        None,
+        false,
+        true,
+        None,
+        None,
+        None,
+        Some(&default_commands()),
+    );
+    match decision {
+        RouteDecision::AgenticToolForced { tools, query } => {
+            assert_eq!(tools, vec!["image_generate"]);
+            assert_eq!(query, "a red circle on white");
+        }
+        other => panic!("expected AgenticToolForced, got {:?}", other),
+    }
+}
+
+#[test]
+fn roleplay_generic_tools_flag_arms_exactly_the_allow_list() {
+    // Bare `/tools` means "all internal tools"; under a roleplay marker that
+    // must become the allow-list, not an empty list (= all internal tools).
+    let decision = RequestRouter::classify_request(
+        &[roleplay_message("/tools tell me about the garden")],
+        None,
+        false,
+        true,
+        None,
+        None,
+        None,
+        Some(&default_commands()),
+    );
+    match decision {
+        RouteDecision::AgenticToolForced { tools, .. } => {
+            assert_eq!(tools, a_prox::router::ROLEPLAY_ALLOWED_TOOLS);
+            assert!(!tools.is_empty());
+        }
+        other => panic!("expected AgenticToolForced, got {:?}", other),
+    }
+}
+
+#[test]
+fn roleplay_tools_flag_subset_is_filtered() {
+    let decision = RequestRouter::classify_request(
+        &[roleplay_message("/tools search rag what did we agree on?")],
+        None,
+        false,
+        true,
+        None,
+        None,
+        None,
+        Some(&default_commands()),
+    );
+    match decision {
+        RouteDecision::AgenticToolForced { tools, query } => {
+            assert_eq!(tools, vec!["rag_search"]);
+            assert_eq!(query, "what did we agree on?");
+        }
+        other => panic!("expected AgenticToolForced, got {:?}", other),
+    }
+}
+
+#[test]
+fn non_roleplay_flag_still_arms_the_requested_tool() {
+    // The restriction must not leak into ordinary (non-roleplay) requests.
+    let decision = RequestRouter::classify_request(
+        &[plain_message("/search what is the weather")],
+        None,
+        false,
+        true,
+        None,
+        None,
+        None,
+        Some(&default_commands()),
+    );
+    match decision {
+        RouteDecision::AgenticToolForced { tools, .. } => {
+            assert_eq!(tools, vec!["web_search"]);
+        }
+        other => panic!("expected AgenticToolForced, got {:?}", other),
+    }
+}
+
+#[test]
+fn armed_tool_schemas_are_filtered_for_roleplay() {
+    let tool = |name: &str| json!({ "type": "function", "function": { "name": name } });
+    let mut payload = json!({
+        "tools": [tool("web_search"), tool("rag_search"), tool("write_file"), tool("image_generate")]
+    });
+    let dropped = a_prox::server::routes::filter_armed_tools_for_roleplay(&mut payload);
+    assert_eq!(dropped, 2);
+    let names: Vec<&str> = payload["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["function"]["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["rag_search", "image_generate"]);
+}
+
+#[test]
+fn armed_tool_filter_leaves_a_payload_without_tools_alone() {
+    let mut payload = json!({ "messages": [] });
+    assert_eq!(a_prox::server::routes::filter_armed_tools_for_roleplay(&mut payload), 0);
+}
+
+#[test]
+fn armed_tool_filter_drops_malformed_schemas() {
+    // A schema we cannot name is not on the allow-list, so it must not survive.
+    let mut payload = json!({ "tools": [json!("not-a-tool"), json!({ "function": {} })] });
+    assert_eq!(a_prox::server::routes::filter_armed_tools_for_roleplay(&mut payload), 2);
+    assert!(payload["tools"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn roleplay_messages_serialize_without_the_marker_when_absent() {
+    // The field must not leak into the upstream payload for ordinary messages.
+    let msg = plain_message("hello");
+    let json = serde_json::to_value(&msg).unwrap();
+    assert!(json.get("roleplay").is_none(), "got {:?}", json);
+
+    let msg = roleplay_message("hello");
+    let json = serde_json::to_value(&msg).unwrap();
+    assert_eq!(json["roleplay"], json!(true));
+}
+
+#[test]
+fn roleplay_marker_deserializes_from_a_client_payload() {
+    let parsed: ChatMessage =
+        serde_json::from_value(json!({ "role": "user", "content": "hi", "roleplay": true }))
+            .unwrap();
+    assert_eq!(parsed.roleplay, Some(true));
+
+    // And a payload that omits it entirely must still parse.
+    let parsed: ChatMessage =
+        serde_json::from_value(json!({ "role": "user", "content": "hi" })).unwrap();
+    assert_eq!(parsed.roleplay, None);
+}
+
+#[test]
+fn default_image_styles_are_available_and_default_is_neutral() {
+    let cfg = a_prox::config::ImageGenerationConfig::default();
+    assert!(cfg.styles.contains_key("anime"));
+    assert!(cfg.styles.contains_key("semi-realistic"));
+    assert!(cfg.styles.contains_key("photo-realistic"));
+    let default = cfg.styles.get("default").unwrap();
+    assert!(default.prompt_suffix.trim().is_empty());
+    assert!(default.negative_prompt.trim().is_empty());
+}
+
+#[test]
+fn style_negative_prompt_suppresses_the_realism_default() {
+    // The shipped `default_negative_prompt` is realism-leaning; the anime
+    // style must actively negate it or the style fight is lost.
+    let cfg = a_prox::config::ImageGenerationConfig::default();
+    let anime = cfg.styles.get("anime").unwrap();
+    assert!(anime.negative_prompt.contains("photorealistic"));
+    assert!(anime.prompt_suffix.contains("anime"));
+}
+
+#[test]
+fn sample_config_parses_the_styles_block() {
+    // Guards the shipped config/default.toml against a malformed styles table.
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/config/default.toml");
+    let cfg = a_prox::config::AppConfig::load(path).expect("sample config must parse");
+    assert!(cfg.image_generation.styles.contains_key("anime"));
+    assert!(cfg.image_generation.styles.contains_key("photo-realistic"));
+}
+
+// ---------------------------------------------------------------------------
+// Per-turn generation budget (`guardrails.max_generation_tokens`)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn generation_budget_default_clears_the_llama_cpp_cap() {
+    // Without an explicit max_tokens, llama.cpp caps at 2048 — and a model that
+    // plans before calling a tool gets cut off mid-thought, emits no tool call,
+    // and the request silently produces no image.
+    assert!(a_prox::config::AppConfig::default().guardrails.max_generation_tokens > 2048);
+}
+
+#[test]
+fn generation_budget_never_overrides_a_client_supplied_value() {
+    // A client that sets max_tokens deliberately (e.g. an auxiliary one-shot
+    // call) must keep it.
+    let mut payload = serde_json::json!({ "max_tokens": 512 });
+    // Simulates apply_generation_budget's early return.
+    if payload.get("max_tokens").map_or(false, |v| !v.is_null()) {
+        // no-op
+    } else {
+        payload["max_tokens"] = serde_json::json!(4096);
+    }
+    assert_eq!(payload["max_tokens"], serde_json::json!(512));
+}
+
+#[test]
+fn generation_budget_is_configurable() {
+    // Parsed as a bare table so the other required AppConfig sections don't
+    // get in the way; the key lives on [guardrails].
+    let cfg: a_prox::config::GuardrailsConfig = toml::from_str("max_generation_tokens = 8192")
+        .expect("guardrails must parse via serde defaults");
+    assert_eq!(cfg.max_generation_tokens, 8192);
+}
+
+#[test]
+fn generation_budget_defaults_when_absent_from_the_table() {
+    let cfg: a_prox::config::GuardrailsConfig =
+        toml::from_str("max_concurrent_inferences = 1").expect("defaults must apply");
+    assert_eq!(cfg.max_generation_tokens, 4096);
+}

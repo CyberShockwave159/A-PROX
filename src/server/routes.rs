@@ -1,6 +1,6 @@
 use axum::{
     body::Body,
-    extract::State,
+    extract::{Path, State},
     http::{HeaderMap, StatusCode},
     response::{sse::Event, IntoResponse, Response},
     Json,
@@ -20,6 +20,7 @@ use crate::context::{
     SYNTHESIS_FORCING_PROMPT,
 };
 use crate::comfy_ui::WorkflowKind;
+use crate::db::SearchResult;
 use crate::error::AppError;
 use crate::guardrails::InferencePermitGuard;
 use crate::imagegen::{
@@ -35,7 +36,7 @@ use crate::images::content_type_for;
 use crate::monitor::{
     ActiveRequest, DbStats, SearXNGStatus,
 };
-use crate::router::{RequestRouter, RouteDecision};
+use crate::router::{has_roleplay_marker, restore_upstream_model, RequestRouter, RouteDecision, ROLEPLAY_ALLOWED_TOOLS};
 use crate::server::models::ChatCompletionChunk;
 use crate::state::AppState;
 use crate::tools::{ExtractedToolCall, ToolParser};
@@ -44,10 +45,22 @@ pub async fn health_check(State(state): State<Arc<AppState>>) -> impl IntoRespon
     let (active_inferences, queued) = state.concurrency_limiter.stats();
     let (total_ram, free_ram, cpu_usage) = state.watchdog.get_telemetry();
 
+    // Advertised so clients (e.g. the CLAN Flutter app) can detect A-PROX and
+    // gate A-PROX-only features without a separate capability probe. `rag` is
+    // always available; the rest mirror live config.
+    let mut capabilities = vec!["rag"];
+    if state.config.image_generation.enabled {
+        capabilities.push("image");
+    }
+    if state.config.file_generation.enabled {
+        capabilities.push("file");
+    }
+
     Json(json!({
         "status": "healthy",
         "service": "A-PROX",
-        "version": "0.1.0",
+        "version": env!("CARGO_PKG_VERSION"),
+        "capabilities": capabilities,
         "hardware": {
             "total_ram_gb": format!("{:.1}", total_ram),
             "available_ram_gb": format!("{:.1}", free_ram),
@@ -276,6 +289,42 @@ pub async fn chat_completions(
     
     let decision = RequestRouter::classify_request(&pruned_messages, tools_payload, bypass_header, state.config.guardrails.enable_agentic_tools, model_name, Some(&*state.intent_classifier), Some(&state.config.intent), Some(&state.config.tool_commands));
 
+    // A routing alias (`a-prox-rag`, `a-prox-agent`, …) selects a strategy, not
+    // a model. Swap it back to the configured upstream model before anything is
+    // forwarded, so it never reaches llama.cpp or a strict OpenAI backend.
+    restore_upstream_model(&mut payload, &state.config.upstream.model_alias);
+
+    // Optional retrieval tuning for the `RAGAugmented` route. Stripped from the
+    // payload so it is never forwarded upstream as an unknown field.
+    let rag = RagOptions::from_payload(&payload);
+    if let Some(obj) = payload.get_mut("rag") {
+        *obj = Value::Null;
+    }
+
+    // Optional visual style for image generation. Also stripped: it is an
+    // A-PROX-only field, applied when the workflow is built (see
+    // `ImageGenService::resolve_style`).
+    let image_style = payload
+        .get("image_style")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    if let Some(obj) = payload.get_mut("image_style") {
+        *obj = Value::Null;
+    }
+
+    // Opt-in: the client only wants the generated artifact, not a caption or a
+    // synthesized reply. Skips two upstream turns that such a client discards.
+    let image_only = payload
+        .get("image_only")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if let Some(obj) = payload.get_mut("image_only") {
+        *obj = Value::Null;
+    }
+
+
     let is_streaming = payload.get("stream")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
@@ -330,15 +379,22 @@ pub async fn chat_completions(
         }
         RouteDecision::RAGAugmented { query } => {
             tracing::info!("Routing via RAG Augmented Search for query: {:?}", query);
-            let search_hits = state.rag_engine.query_rag(&query, None, 5)
+            let search_hits = state.rag_engine.query_rag(&query, rag.collection.as_deref(), rag.top_k)
                 .unwrap_or_default();
 
             let rag_hits_count = search_hits.len();
             if !search_hits.is_empty() {
-                let context_block = state.rag_engine.format_rag_context(&search_hits);
-                inject_context_into_messages(&mut pruned_messages, &context_block);
-                payload["messages"] = serde_json::to_value(&pruned_messages)
-                    .map_err(|e| AppError::Context(e.to_string()))?;
+                let kept: Vec<SearchResult> = search_hits
+                    .into_iter()
+                    .filter(|r| r.score >= rag.min_score)
+                    .take(rag.top_k)
+                    .collect();
+                if !kept.is_empty() {
+                    let context_block = state.rag_engine.format_rag_context(&kept);
+                    inject_context_into_messages(&mut pruned_messages, &context_block);
+                    payload["messages"] = serde_json::to_value(&pruned_messages)
+                        .map_err(|e| AppError::Context(e.to_string()))?;
+                }
             }
 
             state.monitor.update_rag_hits(request_id, rag_hits_count).await;
@@ -408,7 +464,7 @@ pub async fn chat_completions(
                 payload["tools"] = state.tool_registry.get_internal_tools_definitions();
             }
 
-            execute_agentic_loop(&state, payload, pruned_messages, is_streaming, request_id, _permit, image_gen_ctx, file_gen_ctx, Vec::new()).await
+            execute_agentic_loop(&state, payload, pruned_messages, is_streaming, request_id, _permit, image_gen_ctx, file_gen_ctx, Vec::new(), image_style.clone(), image_only).await
         }
         RouteDecision::AgenticToolForced { tools, query } => {
             tracing::info!("Routing via Agentic Function Calling Loop (forced flags {:?})", tools);
@@ -433,7 +489,7 @@ pub async fn chat_completions(
                 payload["tools"] = state.tool_registry.get_internal_tools_definitions();
             }
 
-            execute_agentic_loop(&state, payload, pruned_messages, is_streaming, request_id, _permit, image_gen_ctx, file_gen_ctx, tools).await
+            execute_agentic_loop(&state, payload, pruned_messages, is_streaming, request_id, _permit, image_gen_ctx, file_gen_ctx, tools, image_style.clone(), image_only).await
         }
     };
 
@@ -701,6 +757,10 @@ struct ImageGenContext {
     /// Externally-addressable base URL for the served image (config override →
     /// forwarded headers → request `Host` → loopback fallback).
     public_base: String,
+    /// Visual style key from the request's `image_style` field, resolved against
+    /// `image_generation.styles` at generation time (after the prompt enhancer
+    /// has rewritten the prompt, so the style cannot be diluted).
+    style: Option<String>,
 }
 
 /// State carried through the agentic loop for a file-write request. Populated by
@@ -798,6 +858,7 @@ fn prepare_image_request(
         failed: false,
         last_prompt: String::new(),
         public_base: public_base.to_string(),
+        style: None,
     })
 }
 
@@ -855,6 +916,7 @@ fn prepare_forced_image_request(
         failed: false,
         last_prompt: String::new(),
         public_base: public_base.to_string(),
+        style: None,
     })
 }
 
@@ -934,6 +996,7 @@ fn append_system_message(messages: &mut Vec<ChatMessage>, text: &str) {
             name: None,
             tool_calls: None,
             tool_call_id: None,
+            roleplay: None,
         },
     );
 }
@@ -1052,6 +1115,7 @@ async fn maybe_execute_image_generate(
             None
         },
         public_base: image_ctx.public_base.clone(),
+        style: image_ctx.style.clone(),
     };
 
     match state.image_service.generate(request).await {
@@ -1358,7 +1422,51 @@ fn inject_generated_image_as_user_msg(
         name: None,
         tool_calls: None,
         tool_call_id: None,
+        roleplay: None,
     });
+}
+
+/// Applies the default per-turn generation budget to an agentic-loop payload.
+///
+/// A-PROX deliberately does not invent a token budget for clients that set their
+/// own `max_tokens` — that always wins. This only fills in the gap, because
+/// otherwise the upstream default governs: llama.cpp caps at 2048, which is
+/// enough for a turn that calls a tool immediately but not for an image turn,
+/// where Phase A has to plan a prompt before calling `image_generate`. A
+/// planning model that exceeds the cap is cut off mid-thought, emits no tool
+/// call, and the request silently yields no image.
+///
+/// Configured via `guardrails.max_generation_tokens`; `0` keeps the upstream
+/// default.
+fn apply_generation_budget(state: &AppState, payload: &mut Value) {
+    if payload.get("max_tokens").map_or(false, |v| !v.is_null()) {
+        return; // The client asked for a specific budget.
+    }
+    let budget = state.config.guardrails.max_generation_tokens;
+    if budget > 0 {
+        payload["max_tokens"] = json!(budget);
+    }
+}
+
+/// Removes any tool schema in `payload["tools"]` that is not in
+/// [`ROLEPLAY_ALLOWED_TOOLS`]. Returns how many were dropped.
+///
+/// Filtering the serialized schemas (rather than the tool-name list) makes this
+/// work uniformly no matter how the tools were armed — a `/flag` command, a
+/// client-supplied `tools` array, the all-internal default, or the image/file
+/// pipeline arming.
+pub fn filter_armed_tools_for_roleplay(payload: &mut Value) -> usize {
+    let Some(tools) = payload.get_mut("tools").and_then(|t| t.as_array_mut()) else {
+        return 0;
+    };
+    let before = tools.len();
+    tools.retain(|t| {
+        t.pointer("/function/name")
+            .and_then(|n| n.as_str())
+            .map(|name| ROLEPLAY_ALLOWED_TOOLS.contains(&name))
+            .unwrap_or(false)
+    });
+    before - tools.len()
 }
 
 async fn execute_agentic_loop(
@@ -1371,10 +1479,22 @@ async fn execute_agentic_loop(
     mut image_ctx: Option<ImageGenContext>,
     mut file_ctx: Option<FileGenContext>,
     forced_tools: Vec<String>,
+    image_style: Option<String>,
+    // Return the image artifact and stop — no caption turn, no synthesis turn.
+    image_only: bool,
 ) -> Result<Response, AppError> {
     let context_mgr = state.context_mgr.clone();
     let state_ref = state.clone();
     let mut tools_in_payload = false;
+
+    // Carry the request's visual style into the image context so the workflow
+    // is built with it (the style is applied after the prompt rewrite).
+    if let Some(style) = image_style {
+        if let Some(ctx) = image_ctx.as_mut() {
+            ctx.style = Some(style);
+        }
+    }
+
     // A /flag command restricts the armed surface to exactly the flagged tools.
     if !forced_tools.is_empty() {
         let defs: Vec<Value> = forced_tools
@@ -1428,6 +1548,33 @@ async fn execute_agentic_loop(
         }
     }
 
+    // Roleplay hard guarantee. Applied here, after every branch above has had a
+    // chance to arm tools (forced flag, client-supplied, all-internal, plus the
+    // image/file pipeline arming), so it is the single choke point. A turn
+    // marked `"roleplay": true` can only ever reach rag_search, rag_ingest and
+    // image_generate — never web_search, web_fetch, system_time or write_file.
+    if has_roleplay_marker(&messages) {
+        let before = payload
+            .get("tools")
+            .and_then(|t| t.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
+        let dropped = filter_armed_tools_for_roleplay(&mut payload);
+        let after = payload
+            .get("tools")
+            .and_then(|t| t.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
+        if dropped > 0 {
+            tracing::info!(
+                "Roleplay request: dropped {} tool(s) outside the roleplay allow-list ({} -> {} armed)",
+                dropped,
+                before,
+                after
+            );
+        }
+    }
+
     let upstream_url = format!("{}/v1/chat/completions", state_ref.config.upstream.base_url.trim_end_matches('/'));
     let max_turns = 5;
 
@@ -1444,6 +1591,7 @@ async fn execute_agentic_loop(
             state_ref.monitor.heartbeat();
 
             let mut loop_payload = payload.clone();
+            apply_generation_budget(state, &mut loop_payload);
             loop_payload["stream"] = json!(false);
             loop_payload["messages"] = serde_json::to_value(&messages)
                 .map_err(|e| AppError::Context(e.to_string()))?;
@@ -1489,6 +1637,7 @@ async fn execute_agentic_loop(
                     name: None,
                     tool_calls: tool_calls_field.cloned(),
                     tool_call_id: None,
+                    roleplay: None,
                 });
                 continue;
             }
@@ -1512,6 +1661,7 @@ async fn execute_agentic_loop(
                         name: None,
                         tool_calls: tool_calls_field.cloned(),
                         tool_call_id: None,
+                        roleplay: None,
                     });
 
                     let tool_output =
@@ -1524,6 +1674,7 @@ async fn execute_agentic_loop(
                         name: Some("image_generate".to_string()),
                         tool_calls: None,
                         tool_call_id: Some(call.id.clone()),
+                        roleplay: None,
                     });
 
                     state_ref
@@ -1558,6 +1709,7 @@ async fn execute_agentic_loop(
                         name: None,
                         tool_calls: tool_calls_field.cloned(),
                         tool_call_id: None,
+                        roleplay: None,
                     });
 
                     let tool_output =
@@ -1569,6 +1721,7 @@ async fn execute_agentic_loop(
                         name: Some("write_file".to_string()),
                         tool_calls: None,
                         tool_call_id: Some(call.id.clone()),
+                        roleplay: None,
                     });
 
                     state_ref
@@ -1630,6 +1783,7 @@ async fn execute_agentic_loop(
                     &output_vals,
                 )),
                 tool_call_id: None,
+                roleplay: None,
             });
 
             for (tool_call_id, tool_name, tool_output) in outcomes {
@@ -1639,6 +1793,7 @@ async fn execute_agentic_loop(
                     name: Some(tool_name),
                     tool_calls: None,
                     tool_call_id: Some(tool_call_id),
+                    roleplay: None,
                 });
             }
 
@@ -1670,6 +1825,7 @@ async fn execute_agentic_loop(
                 }
                 inject_system_instructions(&mut messages, SYNTHESIS_FORCING_PROMPT);
                 let mut final_payload = payload.clone();
+                apply_generation_budget(state, &mut final_payload);
                 final_payload["messages"] = serde_json::to_value(&messages)
                     .map_err(|e| AppError::Context(e.to_string()))?;
                 final_payload["stream"] = json!(false);
@@ -1734,6 +1890,7 @@ async fn execute_agentic_loop(
                             &output_vals,
                         )),
                         tool_call_id: None,
+                        roleplay: None,
                     });
 
                     for (tool_call_id, tool_name, tool_output) in outcomes {
@@ -1743,6 +1900,7 @@ async fn execute_agentic_loop(
                             name: Some(tool_name),
                             tool_calls: None,
                             tool_call_id: Some(tool_call_id),
+                            roleplay: None,
                         });
                     }
                     continue;
@@ -1802,6 +1960,7 @@ async fn execute_agentic_loop(
                 let _ = tx_for_task.send(bytes::Bytes::from(format!(": turn {} evaluating\n\n", turn + 1))).await;
 
                 let mut loop_payload = payload.clone();
+                apply_generation_budget(&stream_state, &mut loop_payload);
                 loop_payload["stream"] = json!(false);
                 loop_payload["messages"] = match serde_json::to_value(&messages) {
                     Ok(v) => v,
@@ -1873,6 +2032,7 @@ async fn execute_agentic_loop(
                         name: None,
                         tool_calls: tool_calls_field.cloned(),
                         tool_call_id: None,
+                        roleplay: None,
                     });
                     continue;
                 }
@@ -1896,6 +2056,7 @@ async fn execute_agentic_loop(
                             name: None,
                             tool_calls: tool_calls_field.cloned(),
                             tool_call_id: None,
+                            roleplay: None,
                         });
 
                         let tool_output =
@@ -1908,6 +2069,7 @@ async fn execute_agentic_loop(
                             name: Some("image_generate".to_string()),
                             tool_calls: None,
                             tool_call_id: Some(call.id.clone()),
+                            roleplay: None,
                         });
 
                         stream_state
@@ -1940,6 +2102,7 @@ async fn execute_agentic_loop(
                             name: None,
                             tool_calls: tool_calls_field.cloned(),
                             tool_call_id: None,
+                            roleplay: None,
                         });
 
                         let tool_output = dispatch_tool_execution(
@@ -1952,6 +2115,7 @@ async fn execute_agentic_loop(
                             name: Some("write_file".to_string()),
                             tool_calls: None,
                             tool_call_id: Some(call.id.clone()),
+                            roleplay: None,
                         });
 
                         stream_state
@@ -2024,6 +2188,48 @@ async fn execute_agentic_loop(
                     outcomes.push((tool_call.id.clone(), tool_call.name.clone(), tool_output));
                 }
 
+                // Image-only mode: the client asked for the artifact and nothing
+                // else, so return as soon as the image exists.
+                //
+                // Skipping here avoids two whole upstream turns that this client
+                // would discard anyway:
+                //   1. the next loop iteration (which would ask the model to
+                //      synthesize an answer), and
+                //   2. Phase C — handing the image back to the vision model so it
+                //      can stream a caption (~9k prompt tokens), plus the
+                //      non-streaming synthesis fallback when that caption comes
+                //      back empty.
+                //
+                // The `delta.image_url` event is emitted by A-PROX, not by the
+                // model, so the artifact does not depend on any of that.
+                //
+                // Only short-circuits on success: a failed generation falls
+                // through so the model can report *why* it failed, exactly as
+                // before.
+                if image_only {
+                    if let Some(img) = image_ctx.as_ref().and_then(|c| c.result.as_ref()) {
+                        let url = image_client_url(img);
+                        let event = image_url_sse_payload(&url);
+                        let _ = tx_for_task
+                            .send(bytes::Bytes::from(format!("data: {event}\n\n")))
+                            .await;
+                        let chunk_id = format!("chatcmpl-{}", request_id);
+                        let finish = ChatCompletionChunk::finish_chunk(&chunk_id, "a-prox-agent", "stop");
+                        let _ = tx_for_task.send(bytes::Bytes::from(finish.to_sse_event())).await;
+                        let _ = tx_for_task.send(bytes::Bytes::from("data: [DONE]\n\n")).await;
+                        tracing::info!(
+                            "Image-only mode: returned delta.image_url without a caption or synthesis turn"
+                        );
+                        stream_state.monitor.update_active_request(
+                            request_id, 0, total_tool_calls.clone(), total_rag_hits, upstream_latency_ms,
+                        ).await;
+                        let _ = stream_state.monitor.complete_request(
+                            request_id, "success", upstream_latency_ms.unwrap_or(0.0), None,
+                        ).await;
+                        return;
+                    }
+                }
+
                 let output_vals: Vec<String> =
                     outcomes.iter().map(|o| o.2.clone()).collect();
                 messages.push(ChatMessage {
@@ -2035,6 +2241,7 @@ async fn execute_agentic_loop(
                         &output_vals,
                     )),
                     tool_call_id: None,
+                    roleplay: None,
                 });
 
                 for (tool_call_id, tool_name, tool_output) in outcomes {
@@ -2044,6 +2251,7 @@ async fn execute_agentic_loop(
                         name: Some(tool_name),
                         tool_calls: None,
                         tool_call_id: Some(tool_call_id),
+                        roleplay: None,
                     });
                 }
 
@@ -2086,6 +2294,7 @@ async fn execute_agentic_loop(
                         return;
                     }
                 };
+                apply_generation_budget(&stream_state, &mut final_payload);
                 final_payload["stream"] = json!(true);
 
                 let stream_resp = match stream_state.http_client
@@ -2168,6 +2377,7 @@ async fn execute_agentic_loop(
                     if !tools_in_payload {
                         fb_payload["tools"] = serde_json::json!([]);
                     }
+                    apply_generation_budget(&stream_state, &mut fb_payload);
                     fb_payload["stream"] = json!(false);
 
                     if let Ok(fb_resp) = stream_state.http_client
@@ -2336,6 +2546,7 @@ fn inject_context_into_messages(messages: &mut Vec<ChatMessage>, context_block: 
             name: None,
             tool_calls: None,
             tool_call_id: None,
+            roleplay: None,
         });
     }
 }
@@ -2410,6 +2621,231 @@ pub async fn ingestion_status(State(state): State<Arc<AppState>>) -> impl IntoRe
             "last_indexed": f.last_indexed
         })).collect::<Vec<_>>()
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Direct RAG store access
+//
+// These endpoints exist so a client can use A-PROX's RAG as a *memory backend*
+// without routing a chat request through the LLM. Unlike the `/ingest` flag and
+// the `RAGIngestion` route (which both forward upstream for a model
+// acknowledgement, and the latter hardcodes the `default` collection), these
+// are pure store operations: no generation, no inference permit, no LLM cost.
+//
+// A client that scopes its own memories to a `collection` per conversation
+// (e.g. `clan_<characterId>_<threadId>`) keeps unrelated indexed documents out
+// of its retrievals — `query_rag` searches *all* collections when the
+// collection filter is `None`.
+// ---------------------------------------------------------------------------
+
+/// Default retrieval depth, matching the hardcoded value the `RAGAugmented`
+/// route has always used.
+const DEFAULT_RAG_TOP_K: usize = 5;
+/// Upper bound on `top_k` so a client cannot ask for the entire store.
+const MAX_RAG_TOP_K: usize = 50;
+
+/// Client-supplied retrieval tuning for the `RAGAugmented` route, read from the
+/// request's top-level `"rag"` object:
+///
+/// ```json
+/// "rag": { "collection": "clan_abc_xyz", "top_k": 3, "min_score": 0.35 }
+/// ```
+///
+/// Every field is optional; omitting the object (or any field) preserves the
+/// historical behaviour of searching all collections and taking 5 hits.
+#[derive(Debug, Clone)]
+pub struct RagOptions {
+    pub collection: Option<String>,
+    pub top_k: usize,
+    pub min_score: f32,
+}
+
+impl Default for RagOptions {
+    fn default() -> Self {
+        Self {
+            collection: None,
+            top_k: DEFAULT_RAG_TOP_K,
+            min_score: 0.0,
+        }
+    }
+}
+
+impl RagOptions {
+    /// Parses and clamps the `"rag"` object out of a request payload.
+    pub fn from_payload(payload: &Value) -> Self {
+        let mut opts = RagOptions::default();
+        let Some(obj) = payload.get("rag").and_then(|v| v.as_object()) else {
+            return opts;
+        };
+
+        if let Some(collection) = obj.get("collection").and_then(|v| v.as_str()) {
+            let trimmed = collection.trim();
+            if !trimmed.is_empty() {
+                opts.collection = Some(trimmed.to_string());
+            }
+        }
+        if let Some(top_k) = obj.get("top_k").and_then(|v| v.as_u64()) {
+            opts.top_k = (top_k as usize).clamp(1, MAX_RAG_TOP_K);
+        }
+        if let Some(min_score) = obj.get("min_score").and_then(|v| v.as_f64()) {
+            opts.min_score = min_score.clamp(0.0, 1.0) as f32;
+        }
+        opts
+    }
+}
+
+/// Request body for `POST /rag/ingest`.
+#[derive(serde::Deserialize)]
+pub struct RagIngestRequest {
+    pub collection: String,
+    #[serde(default)]
+    pub source_uri: Option<String>,
+    pub content: String,
+}
+
+/// Request body for `POST /rag/query`.
+#[derive(serde::Deserialize)]
+pub struct RagQueryRequest {
+    pub query: String,
+    #[serde(default)]
+    pub collection: Option<String>,
+    #[serde(default)]
+    pub top_k: Option<usize>,
+    #[serde(default)]
+    pub min_score: Option<f32>,
+}
+
+/// Chunk a document into the RAG store, replacing any prior version of the same
+/// `(collection, source_uri)` pair.
+pub async fn rag_ingest(
+    State(state): State<Arc<AppState>>,
+    axum::Json(req): axum::Json<RagIngestRequest>,
+) -> Result<Json<Value>, AppError> {
+    let collection = req.collection.trim();
+    if collection.is_empty() {
+        return Err(AppError::BadRequest("`collection` must not be empty".into()));
+    }
+    let content = req.content.trim();
+    if content.is_empty() {
+        return Err(AppError::BadRequest("`content` must not be empty".into()));
+    }
+
+    let source_uri = req
+        .source_uri
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("api-{}", unique_source_suffix()));
+
+    // The embedder is CPU-only, so keep it off the async runtime's core lanes
+    // the same way the ingestion path does. Chunk counts are small (512-token
+    // chunks), so a blocking hop is cheap and avoids starving the runtime.
+    let engine = state.rag_engine.clone();
+    let collection_owned = collection.to_string();
+    let source_uri_clone = source_uri.clone();
+    let content_owned = content.to_string();
+    let chunks = tokio::task::spawn_blocking(move || {
+        engine.ingest_document(&collection_owned, &source_uri_clone, &content_owned)
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("ingest task failed: {e}")))??;
+
+    tracing::info!(
+        "POST /rag/ingest -> {} chunk(s) into collection {:?} (source {:?})",
+        chunks,
+        collection,
+        source_uri
+    );
+    Ok(Json(json!({
+        "status": "ok",
+        "chunks": chunks,
+        "collection": collection,
+        "source_uri": source_uri,
+    })))
+}
+
+/// Hybrid-search the RAG store and return the matching chunks.
+pub async fn rag_query(
+    State(state): State<Arc<AppState>>,
+    axum::Json(req): axum::Json<RagQueryRequest>,
+) -> Result<Json<Value>, AppError> {
+    let query = req.query.trim();
+    if query.is_empty() {
+        return Err(AppError::BadRequest("`query` must not be empty".into()));
+    }
+
+    let top_k = req
+        .top_k
+        .unwrap_or(DEFAULT_RAG_TOP_K)
+        .clamp(1, MAX_RAG_TOP_K);
+    let min_score = req.min_score.unwrap_or(0.0);
+    let collection = req
+        .collection
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    let engine = state.rag_engine.clone();
+    let query_owned = query.to_string();
+    let results = tokio::task::spawn_blocking(move || {
+        engine.query_rag(&query_owned, collection.as_deref(), top_k)
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("query task failed: {e}")))??;
+
+    // Fetch a slightly deeper page than requested so the score floor discards
+    // weak hits without shrinking the result set below `top_k` for free.
+    let kept: Vec<Value> = results
+        .into_iter()
+        .filter(|r| r.score >= min_score)
+        .take(top_k)
+        .map(|r| {
+            json!({
+                "chunk_id": r.chunk_id,
+                "collection": r.collection,
+                "source_uri": r.source_uri,
+                "chunk_index": r.chunk_index,
+                "content": r.content,
+                "score": r.score,
+            })
+        })
+        .collect();
+
+    Ok(Json(json!({
+        "status": "ok",
+        "results": kept,
+    })))
+}
+
+/// Number of chunks stored in a collection, so a client can tell an empty
+/// collection (needing a backfill) from a populated one.
+pub async fn rag_collection_count(
+    State(state): State<Arc<AppState>>,
+    Path(collection): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    let engine = state.rag_engine.clone();
+    let stats = tokio::task::spawn_blocking(move || engine.stats())
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("stats task failed: {e}")))??;
+    let (total, collections) = stats;
+    let chunks = collections.get(&collection).copied().unwrap_or(0);
+    Ok(Json(json!({
+        "status": "ok",
+        "collection": collection,
+        "chunks": chunks,
+        "chunks_total": total,
+    })))
+}
+
+/// Monotonic-ish suffix for auto-generated `source_uri` values, so two
+/// ingests of different content in the same second don't collide.
+fn unique_source_suffix() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
 }
 
 #[cfg(test)]

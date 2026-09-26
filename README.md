@@ -37,6 +37,174 @@ A-PROX was built for a machine where the GPU is fully occupied:
 
 ---
 
+## Client Capability Reporting
+
+`GET /health` advertises what this build can do, so a client can enable the
+matching features without a separate probe:
+
+```json
+{
+  "status": "healthy",
+  "service": "A-PROX",
+  "version": "1.9.0",
+  "capabilities": ["rag", "image", "file"],
+  "hardware": { "...": "..." },
+  "concurrency": { "...": "..." },
+  "upstream": { "endpoint": "...", "model_alias": "..." }
+}
+```
+
+`rag` is always present. `image` and `file` mirror `[image_generation].enabled`
+and `[file_generation].enabled`. A client that gets no `capabilities` key (any
+older build, or a plain llama.cpp server) should assume no A-PROX features.
+
+---
+
+## Direct RAG Store Access
+
+The RAG store is usable as a **memory backend** for a client that wants recall
+without routing a generation through the LLM. These three endpoints are pure
+store operations: no model call, no inference permit, no acknowledgement turn.
+
+> Why not the `/ingest` flag or the `RAGIngestion` route? Both forward upstream
+> afterwards for a model acknowledgement, so every ingested turn costs a
+> generation — and `RAGIngestion` hardcodes the shared `default` collection, so
+> a client cannot scope memories per conversation.
+
+### `POST /rag/ingest`
+
+```json
+{ "collection": "clan_<characterId>_<threadId>", "source_uri": "clan/c/t/m1", "content": "User: hi
+Alice: hello" }
+```
+
+```json
+{ "status": "ok", "chunks": 2, "collection": "...", "source_uri": "..." }
+```
+
+Idempotent by `source_uri`: chunks previously stored for the same
+`(collection, source_uri)` pair are deleted first, so re-ingesting a rewritten
+document replaces it instead of accumulating duplicates. `source_uri` is
+optional; a timestamped one is generated when omitted.
+
+### `POST /rag/query`
+
+```json
+{ "query": "what did we agree on", "collection": "clan_<characterId>_<threadId>", "top_k": 3, "min_score": 0.35 }
+```
+
+```json
+{ "status": "ok", "results": [ { "chunk_id": 7, "collection": "...", "source_uri": "...", "chunk_index": 0, "content": "...", "score": 0.81 } ] }
+```
+
+All three filters are optional. Omitting `collection` searches **every**
+collection, which is rarely what a client with per-conversation memories wants.
+`top_k` defaults to 5 and is clamped to `[1, 50]`; `min_score` is clamped to
+`[0, 1]`.
+
+### `GET /rag/collections/{name}/count`
+
+```json
+{ "status": "ok", "collection": "clan_abc_t1", "chunks": 12, "chunks_total": 340 }
+```
+
+Lets a client distinguish an empty collection (needing a backfill) from a
+populated one.
+
+---
+
+## Request Fields
+
+A few body fields are A-PROX-specific. They are consumed and stripped before
+the payload is forwarded upstream, so they never reach llama.cpp.
+
+### `model` — routing aliases
+
+`a-prox-rag`, `a-prox-knowledge`, `a-prox-docs`, `a-prox-agent`, `a-prox-tools`,
+`a-prox-direct`, `a-prox-pass`, `a-prox-fast` select a *strategy*, not a model.
+A-PROX rewrites them back to `[upstream].model_alias` before forwarding. (If
+you set an alias and A-PROX did not rewrite it, that is a bug — a strict
+OpenAI-compatible backend will reject the request.)
+
+### `rag` — retrieval tuning
+
+```json
+"rag": { "collection": "clan_abc_t1", "top_k": 3, "min_score": 0.35 }
+```
+
+Consumed by the `RAGAugmented` route, which otherwise searches all collections
+and takes 5 hits. Absent → the historical behaviour, unchanged.
+
+### `roleplay` — per-message tool restriction
+
+Tag a message with `"roleplay": true` and A-PROX restricts the tools that message
+can reach to `rag_search`, `rag_ingest` and `image_generate`. Intended for
+immersive roleplay clients, where a turn must never break character to run a web
+search, read the clock, or write a file.
+
+```json
+{"role": "user", "content": "I smile and say hello", "roleplay": true}
+```
+
+Enforcement is in `src/router/mod.rs` (narrowing a forced tool list) and
+`src/server/routes.rs` (filtering the armed tool schemas), so it covers the
+forced-flag, client-supplied-tools and all-internal paths alike. A `/flag` naming
+only a forbidden tool (`/search`, `/fetch`, `/time`, `/file`) downgrades to a
+plain pass-through rather than arming it.
+
+### Per-turn generation budget
+
+`guardrails.max_generation_tokens` (default `4096`) is sent as `max_tokens` on
+every agentic-loop turn — but **only when the client didn't set its own**.
+`0` omits the field and restores the upstream default.
+
+This exists because A-PROX otherwise inherits the upstream's cap, and
+llama.cpp's is 2048. That is ample for a turn that calls a tool immediately, but
+an image turn has to *plan* first: Phase A rewrites the prompt, and only then
+does the model call `image_generate`. A model that reasons at length gets cut
+off at 2048, the tool call is never emitted, and the request completes
+"successfully" with no image and no error — the failure is invisible from the
+client. Raise the value for such models; lower it to bound the cost of a turn
+that fails to converge.
+
+### `image_only` — artifact only, no text
+
+```json
+"image_only": true
+```
+
+Return the image and stop. Skips two upstream turns that exist only to produce
+*text about* the picture: the vision turn that hands the generated image back to
+the model so it can stream a caption, and the final synthesis turn (plus its
+non-streaming fallback when the caption comes back empty).
+
+The `delta.image_url` event is emitted by A-PROX itself, so the artifact does not
+depend on either turn. Measured on a 35B MoE model, this removes ~85s from a
+~200s image request.
+
+Use it when the client discards the reply text — e.g. attaching a generated
+picture to an existing message it is going to keep verbatim. Leave it unset when
+you want the caption (the default, and what a conversational "draw me a cat"
+expects).
+
+Only short-circuits when the image was actually produced; a failed generation
+falls through so the model can report why, exactly as before.
+
+### `image_style` — visual style
+
+```json
+"image_style": "anime"
+```
+
+Selects an entry from `[image_generation.styles]`. The style contributes a
+`prompt_suffix` appended to the final prompt and a `negative_prompt` that
+**replaces** `image_generation.default_negative_prompt`. Both are applied in
+`WorkflowTemplate::apply`, i.e. **after** the prompt enhancer has rewritten the
+prompt — which is the point: a style stated only in the prompt text is at the
+mercy of a rewriter. Unknown keys fall back to the neutral `default` style.
+
+---
+
 ## Key Features
 
 1. **Intelligent Request Routing** — Passes through simple requests directly; routes search/RAG queries through extra processing.
@@ -102,7 +270,7 @@ Expected response:
 {
   "status": "healthy",
   "service": "A-PROX",
-  "version": "1.2.1",
+  "version": "1.9.0",
   "hardware": {
     "total_ram_gb": "125.7",
     "available_ram_gb": "97.7",
@@ -353,6 +521,12 @@ pdf_upstream_model = "qwen3.6-35b-moe"  # Vision model for PDF processing
 
 A-PROX includes a full RAG pipeline that lets your LLM answer questions using documents stored in a local SQLite vector database. All embeddings and vector search run on CPU with zero GPU memory — the ONNX embedding model processes text locally.
 
+A client can also treat this store as a **memory backend**, writing and reading
+conversational turns directly via `/rag/ingest` and `/rag/query` (see [Direct
+RAG Store Access](#direct-rag-store-access)) and recalling them through the
+`a-prox-rag` route. Scoping memories to a `collection` per conversation is what
+keeps one session's memories out of another's retrievals.
+
 ### Architecture Overview
 
 ```
@@ -367,6 +541,11 @@ User Query ──→ ONNX Embeddings ──→ Hybrid Search ────┘
                                                       ▼
                                             Forwarded to llama.cpp for Answering
 ```
+
+Scoping: a `collection` is the unit of isolation. `query_rag` searches *all*
+collections when no filter is given, so a client that stores memories for
+several conversations must pass its own `collection` — either through
+`/rag/query` or through the `rag` request object on a chat request.
 
 The system uses **hybrid search** combining three techniques:
 1. **Vector similarity** — cosine distance on 384-dimensional BGE embeddings
@@ -850,7 +1029,51 @@ inline_data_url = false         # true → emit image_url as a base64 data-URL (
 poll_interval_ms = 2000
 generation_timeout_s = 180
 default_negative_prompt = "bad anatomy, bad composition, bad lighting, distorted face, extra limbs, low quality, out of focus, overexposed, plastic, poor symmetry, signature, watermark, ugly, censored"
+
+# Named visual styles, selected per request with the `image_style` field.
+# Applied to the prompt and negative prompt when the ComfyUI graph is built —
+# i.e. AFTER the prompt enhancer rewrote the prompt, so a model rewriter cannot
+# dilute the style. A style's `negative_prompt` REPLACES the
+# `default_negative_prompt` above, which is realism-leaning and actively fights
+# the non-photographic styles.
+[image_generation.styles.default]
+prompt_suffix = ""
+negative_prompt = ""
+
+[image_generation.styles.anime]
+prompt_suffix = "anime key visual, cel-shaded, clean line art, flat colour blocking, expressive eyes"
+negative_prompt = "photorealistic, realistic skin pores, 3d render, cgi, photographic, airbrushed, soft gradients"
+
+[image_generation.styles.semi-realistic]
+prompt_suffix = "semi-realistic digital illustration, soft painterly shading, subsurface skin scattering, detailed fabric texture"
+negative_prompt = "flat cel shading, chibi, plastic skin, harsh 3d render, fully photographic, anime line art"
+
+[image_generation.styles.photo-realistic]
+prompt_suffix = "photorealistic photograph, natural skin texture, shallow depth of field, physically accurate lighting, 35mm lens"
+negative_prompt = "illustration, anime, cel-shaded, painting, cgi, 3d render, plastic skin, oversaturated"
 ```
+
+`default` is the neutral fallback used when a request omits `image_style` or
+names one that isn't configured; it adds nothing and suppresses nothing. See
+[Request Fields](#request-fields) for the client side.
+
+### Character consistency across images
+
+The i2i workflow feeds the attached image to `TextEncodeQwenImage21` as
+`images.image_1` while the KSampler runs at `denoise: 1` with a latent from the
+same encoder. That is reference *conditioning*, not a latent init — the model
+receives the subject as conditioning tokens, which is why a character keeps a
+recognisable face across unrelated scenes. It is the mechanism behind
+"image-to-image automatically when a photo is attached".
+
+Two consequences for clients:
+
+- The reference **must** be PNG, JPEG or WebP. A-PROX sniffs magic bytes
+  (`guess_format`) and silently falls through to text-to-image for anything
+  else — a request carrying an AVIF reference produces a plausible image that
+  ignored the reference, with no error.
+- The reference must arrive as an `image_url` part on the **latest user
+  message**, and only array content is inspected — a plain string is ignored.
 
 There are two independent URL representations — the LLM always sees the small
 served URL; the client sees either that served URL or an inline data-URL:

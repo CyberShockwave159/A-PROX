@@ -119,6 +119,41 @@ impl VectorStore {
         Ok(chunk_id)
     }
 
+    /// Removes every chunk previously stored for a `(collection, source_uri)`
+    /// pair, along with its FTS5 and vec0 rows.
+    ///
+    /// `insert_chunk` is a plain INSERT, so re-ingesting the same source would
+    /// otherwise accumulate duplicate chunks forever. Callers that re-ingest a
+    /// stable `source_uri` (e.g. a character appearance sheet rewritten on every
+    /// save) delete first so the document is replaced rather than appended to.
+    /// Returns the number of chunks removed.
+    pub fn delete_document(&self, collection: &str, source_uri: &str) -> anyhow::Result<usize> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+
+        // Collect chunk ids first: the FTS and vec0 side tables key off
+        // `document_chunks.id` (as rowid / chunk_id respectively).
+        let ids: Vec<i64> = {
+            let mut stmt = tx.prepare(
+                "SELECT id FROM document_chunks WHERE collection = ?1 AND source_uri = ?2",
+            )?;
+            let rows = stmt.query_map(params![collection, source_uri], |row| row.get(0))?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+
+        for id in &ids {
+            tx.execute("DELETE FROM document_chunks_fts WHERE rowid = ?1", params![id])?;
+            tx.execute("DELETE FROM vec_chunks WHERE chunk_id = ?1", params![id])?;
+        }
+        tx.execute(
+            "DELETE FROM document_chunks WHERE collection = ?1 AND source_uri = ?2",
+            params![collection, source_uri],
+        )?;
+
+        tx.commit()?;
+        Ok(ids.len())
+    }
+
     /// Hybrid Search: Combines vector similarity with FTS5 lexical match using RRF
     pub fn hybrid_search(
         &self,
