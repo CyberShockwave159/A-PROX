@@ -364,6 +364,39 @@ tr:hover { background: var(--bg-row-hover); }
   border-bottom: 1px solid rgba(48,54,61,0.5);
 }
 .latency-row:last-child { border-bottom: none; }
+/* Fixed height + internal scroll: collection count changes never resize the
+   card, so the surrounding grid never shifts on poll. */
+.collection-list {
+  margin-top: 6px;
+  height: 132px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+}
+.collection-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 8px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.collection-row + .collection-row { border-top: 1px solid rgba(48,54,61,0.5); }
+.collection-name {
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.collection-count {
+  color: var(--accent);
+  font-weight: 600;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  flex: none;
+}
 @media (max-width: 768px) {
   .grid { grid-template-columns: 1fr; }
   .config-grid { grid-template-columns: 1fr; }
@@ -473,6 +506,7 @@ tr:hover { background: var(--bg-row-hover); }
         <span class="metric-label">Collections</span>
         <span class="metric-value" id="dbCollections">--</span>
       </div>
+      <div class="collection-list" id="collectionList"></div>
       <div class="upstream-info">
         <div class="metric-row">
           <span class="metric-label">Upstream</span>
@@ -768,10 +802,26 @@ function renderServices(data) {
   }
   document.getElementById('dbChunks').textContent = (data.db_stats?.total_chunks || '--');
   const cols = data.db_stats?.collections || {};
-  const colEntries = Object.entries(cols);
+  // HashMap key order is not stable across polls, so sort before rendering.
+  const colEntries = Object.entries(cols).sort(([a], [b]) => a.localeCompare(b));
   document.getElementById('dbCollections').textContent = colEntries.length > 0
-    ? colEntries.map(([k,v]) => `${k}: ${v}`).join(', ')
+    ? colEntries.length
     : 'None';
+  const listEl = document.getElementById('collectionList');
+  let colHtml = '';
+  if (colEntries.length === 0) {
+    colHtml = '<div class="no-data" style="padding:16px;font-size:11px">No collections</div>';
+  } else {
+    for (const [k, v] of colEntries) {
+      const name = escapeHtml(String(k));
+      colHtml += `<div class="collection-row" title="${name}: ${v}"><span class="collection-name">${name}</span><span class="collection-count">${v}</span></div>`;
+    }
+  }
+  const colSig = colEntries.map(([k, v]) => k + '=' + v).join('\n');
+  if (listEl.dataset.sig !== colSig) {
+    listEl.dataset.sig = colSig;
+    listEl.innerHTML = colHtml;
+  }
   const cfg = data.config;
   document.getElementById('upstreamUrl').textContent = cfg.upstream_base_url;
   document.getElementById('upstreamModel').textContent = cfg.upstream_model_alias;
